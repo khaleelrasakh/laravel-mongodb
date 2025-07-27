@@ -4,24 +4,35 @@ declare(strict_types=1);
 
 namespace MongoDB\Laravel\Eloquent;
 
+use Closure;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\Model;
 use MongoDB\BSON\Document;
+use MongoDB\Builder\Expression;
+use MongoDB\Builder\Type\QueryInterface;
+use MongoDB\Builder\Type\SearchOperatorInterface;
 use MongoDB\Driver\CursorInterface;
-use MongoDB\Driver\Exception\WriteException;
+use MongoDB\Driver\Exception\BulkWriteException;
 use MongoDB\Laravel\Connection;
 use MongoDB\Laravel\Helpers\QueriesRelationships;
 use MongoDB\Laravel\Query\AggregationBuilder;
 use MongoDB\Model\BSONDocument;
+use Override;
 
 use function array_key_exists;
-use function array_merge;
+use function array_map;
+use function array_replace;
 use function collect;
 use function is_array;
 use function is_object;
 use function iterator_to_array;
 use function property_exists;
 
-/** @method \MongoDB\Laravel\Query\Builder toBase() */
+/**
+ * @method \MongoDB\Laravel\Query\Builder toBase()
+ * @template TModel of Model
+ */
 class Builder extends EloquentBuilder
 {
     private const DUPLICATE_KEY_ERROR = 11000;
@@ -49,6 +60,7 @@ class Builder extends EloquentBuilder
         'insertusing',
         'max',
         'min',
+        'autocomplete',
         'pluck',
         'pull',
         'push',
@@ -58,7 +70,7 @@ class Builder extends EloquentBuilder
     ];
 
     /**
-     * @return ($function is null ? AggregationBuilder : self)
+     * @return ($function is null ? AggregationBuilder : $this)
      *
      * @inheritdoc
      */
@@ -69,7 +81,59 @@ class Builder extends EloquentBuilder
         return $result ?: $this;
     }
 
-    /** @inheritdoc */
+    /**
+     * Performs a full-text search of the field or fields in an Atlas collection.
+     *
+     * @see https://www.mongodb.com/docs/atlas/atlas-search/aggregation-stages/search/
+     *
+     * @return Collection<int, TModel>
+     */
+    public function search(
+        SearchOperatorInterface|array $operator,
+        ?string $index = null,
+        ?array $highlight = null,
+        ?bool $concurrent = null,
+        ?string $count = null,
+        ?string $searchAfter = null,
+        ?string $searchBefore = null,
+        ?bool $scoreDetails = null,
+        ?array $sort = null,
+        ?bool $returnStoredSource = null,
+        ?array $tracking = null,
+    ): Collection {
+        $results = $this->toBase()->search($operator, $index, $highlight, $concurrent, $count, $searchAfter, $searchBefore, $scoreDetails, $sort, $returnStoredSource, $tracking);
+
+        return $this->model->hydrate($results->all());
+    }
+
+    /**
+     * Performs a semantic search on data in your Atlas Vector Search index.
+     * NOTE: $vectorSearch is only available for MongoDB Atlas clusters, and is not available for self-managed deployments.
+     *
+     * @see https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-search-stage/
+     *
+     * @return Collection<int, TModel>
+     */
+    public function vectorSearch(
+        string $index,
+        string $path,
+        array $queryVector,
+        int $limit,
+        bool $exact = false,
+        QueryInterface|array $filter = [],
+        int|null $numCandidates = null,
+    ): Collection {
+        $results = $this->toBase()->vectorSearch($index, $path, $queryVector, $limit, $exact, $filter, $numCandidates);
+
+        return $this->model->hydrate($results->all());
+    }
+
+    /**
+     * @param array $options
+     *
+     * @inheritdoc
+     */
+    #[Override]
     public function update(array $values, array $options = [])
     {
         // Intercept operations on embedded models and delegate logic
@@ -173,7 +237,13 @@ class Builder extends EloquentBuilder
         return parent::decrement($column, $amount, $extra);
     }
 
-    /** @inheritdoc */
+    /**
+     * @param (Closure():T)|Expression|null $value
+     *
+     * @return ($value is Closure ? T : ($value is null ? Collection : Expression))
+     *
+     * @template T
+     */
     public function raw($value = null)
     {
         // Get raw results from the query builder.
@@ -181,14 +251,18 @@ class Builder extends EloquentBuilder
 
         // Convert MongoCursor results to a collection of models.
         if ($results instanceof CursorInterface) {
-            if(!config('database.connections.mongodb.options.AggregateCollectionArray')){
-                $results->setTypeMap(['root' => 'array', 'document' => 'array', 'array' => 'array']);
-            }
-            
-            $results = $this->query->aliasIdForResult(iterator_to_array($results));
+    if (!config('database.connections.mongodb.options.AggregateCollectionArray')) {
+        $results->setTypeMap(['root' => 'array', 'document' => 'array', 'array' => 'array']);
+    }
 
-            return $this->model->hydrate($results);
-        }
+    $results = iterator_to_array($results);
+
+    if (!config('database.connections.mongodb.options.DisableAliasIdForResult')) {
+        $results = array_map(fn ($document) => $this->query->aliasIdForResult($document), $results);
+    }
+
+    return $this->model->hydrate($results);
+}
 
         // Convert MongoDB Document to a single object.
         if (is_object($results) && (property_exists($results, '_id') || property_exists($results, 'id'))) {
@@ -209,6 +283,7 @@ class Builder extends EloquentBuilder
         return $results;
     }
 
+    #[Override]
     public function firstOrCreate(array $attributes = [], array $values = [])
     {
         $instance = (clone $this)->where($attributes)->first();
@@ -218,12 +293,13 @@ class Builder extends EloquentBuilder
 
         // createOrFirst is not supported in transaction.
         if ($this->getConnection()->getSession()?->isInTransaction()) {
-            return $this->create(array_merge($attributes, $values));
+            return $this->create(array_replace($attributes, $values));
         }
 
         return $this->createOrFirst($attributes, $values);
     }
 
+    #[Override]
     public function createOrFirst(array $attributes = [], array $values = [])
     {
         // The duplicate key error would abort the transaction. Using the regular firstOrCreate in that case.
@@ -232,8 +308,8 @@ class Builder extends EloquentBuilder
         }
 
         try {
-            return $this->create(array_merge($attributes, $values));
-        } catch (WriteException $e) {
+            return $this->create(array_replace($attributes, $values));
+        } catch (BulkWriteException $e) {
             if ($e->getCode() === self::DUPLICATE_KEY_ERROR) {
                 return $this->where($attributes)->first() ?? throw $e;
             }
@@ -247,9 +323,8 @@ class Builder extends EloquentBuilder
      * TODO Remove if https://github.com/laravel/framework/commit/6484744326531829341e1ff886cc9b628b20d73e
      * will be reverted
      * Issue in laravel/frawework https://github.com/laravel/framework/issues/27791.
-     *
-     * @return array
      */
+    #[Override]
     protected function addUpdatedAtColumn(array $values)
     {
         if (! $this->model->usesTimestamps() || $this->model->getUpdatedAtColumn() === null) {
@@ -257,7 +332,7 @@ class Builder extends EloquentBuilder
         }
 
         $column = $this->model->getUpdatedAtColumn();
-        $values = array_merge(
+        $values = array_replace(
             [$column => $this->model->freshTimestampString()],
             $values,
         );
@@ -271,6 +346,7 @@ class Builder extends EloquentBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     protected function ensureOrderForCursorPagination($shouldReverse = false)
     {
         if (empty($this->query->orders)) {

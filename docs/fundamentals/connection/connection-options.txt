@@ -32,6 +32,7 @@ This guide covers the following topics:
 
 - :ref:`laravel-connection-auth-options`
 - :ref:`laravel-driver-options`
+- :ref:`laravel-disable-id-alias`
 
 .. _laravel-connection-auth-options:
 
@@ -349,3 +350,47 @@ item, as shown in the following example:
 
 See the `$driverOptions: array <https://www.mongodb.com/docs/php-library/current/reference/method/MongoDBClient__construct/#parameters>`__
 section of the {+php-library+} documentation for a list of driver options.
+
+.. _laravel-disable-id-alias:
+
+Disable Use of id Field Name Conversion
+---------------------------------------
+
+Starting in {+odm-long+} v5.0, ``id`` is an alias for the ``_id`` field
+in MongoDB documents, and the library automatically converts ``id``
+to ``_id`` for both top level and embedded fields when querying and
+storing data.
+
+When using {+odm-long+} v5.3 or later, you can disable the automatic
+conversion of ``id`` to ``_id`` for embedded documents. To do so,
+perform either of the following actions:
+
+1. Set the ``rename_embedded_id_field`` setting to ``false`` in your
+   ``config/database.php`` file:
+
+   .. code-block:: php
+      :emphasize-lines: 6
+   
+      'connections' => [
+          'mongodb' => [
+              'dsn' => 'mongodb+srv://mongodb0.example.com/',
+              'driver' => 'mongodb',
+              'database' => 'sample_mflix',
+              'rename_embedded_id_field' => false,
+              // Other settings
+          ],
+      ],
+
+#. Pass ``false`` to the ``setRenameEmbeddedIdField()`` method in your
+   application:
+
+   .. code-block:: php
+   
+      DB::connection('mongodb')->setRenameEmbeddedIdField(false);
+
+.. important::
+
+   We recommend using this option only to provide backwards
+   compatibility with existing document schemas. In new projects,
+   avoid using ``id`` for field names in embedded documents so that
+   you can maintain {+odm-long+}'s default behavior.

@@ -6,8 +6,15 @@ namespace MongoDB\Laravel\Relations;
 
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo as EloquentBelongsTo;
+use Override;
 
-class BelongsTo extends \Illuminate\Database\Eloquent\Relations\BelongsTo
+/**
+ * @template TRelatedModel of Model
+ * @template TDeclaringModel of Model
+ * @extends EloquentBelongsTo<TRelatedModel, TDeclaringModel>
+ */
+class BelongsTo extends EloquentBelongsTo
 {
     /**
      * Get the key for comparing against the parent key in "has" query.
@@ -20,6 +27,7 @@ class BelongsTo extends \Illuminate\Database\Eloquent\Relations\BelongsTo
     }
 
     /** @inheritdoc */
+    #[Override]
     public function addConstraints()
     {
         if (static::$constraints) {
@@ -31,6 +39,7 @@ class BelongsTo extends \Illuminate\Database\Eloquent\Relations\BelongsTo
     }
 
     /** @inheritdoc */
+    #[Override]
     public function addEagerConstraints(array $models)
     {
         // We'll grab the primary key name of the related models since it could be set to
@@ -40,6 +49,7 @@ class BelongsTo extends \Illuminate\Database\Eloquent\Relations\BelongsTo
     }
 
     /** @inheritdoc */
+    #[Override]
     public function getRelationExistenceQuery(Builder $query, Builder $parentQuery, $columns = ['*'])
     {
         return $query;
@@ -52,11 +62,13 @@ class BelongsTo extends \Illuminate\Database\Eloquent\Relations\BelongsTo
      *
      * @return string
      */
+    #[Override]
     protected function whereInMethod(Model $model, $key)
     {
         return 'whereIn';
     }
 
+    #[Override]
     public function getQualifiedForeignKeyName(): string
     {
         return $this->foreignKey;

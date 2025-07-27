@@ -7,7 +7,13 @@ namespace MongoDB\Laravel\Relations;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany as EloquentHasMany;
+use Override;
 
+/**
+ * @template TRelatedModel of Model
+ * @template TDeclaringModel of Model
+ * @extends EloquentHasMany<TRelatedModel, TDeclaringModel>
+ */
 class HasMany extends EloquentHasMany
 {
     /**
@@ -15,6 +21,7 @@ class HasMany extends EloquentHasMany
      *
      * @return string
      */
+    #[Override]
     public function getForeignKeyName()
     {
         return $this->foreignKey;
@@ -31,6 +38,7 @@ class HasMany extends EloquentHasMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function getRelationExistenceQuery(Builder $query, Builder $parentQuery, $columns = ['*'])
     {
         $foreignKey = $this->getHasCompareKey();
@@ -41,10 +49,9 @@ class HasMany extends EloquentHasMany
     /**
      * Get the name of the "where in" method for eager loading.
      *
-     * @param string $key
-     *
-     * @return string
+     * @inheritdoc
      */
+    #[Override]
     protected function whereInMethod(Model $model, $key)
     {
         return 'whereIn';

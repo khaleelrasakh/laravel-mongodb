@@ -10,7 +10,9 @@ use Illuminate\Pagination\AbstractPaginator;
 use Illuminate\Support\Facades\DB;
 use MongoDB\BSON\ObjectId;
 use MongoDB\BSON\Regex;
+use MongoDB\BSON\UTCDateTime;
 use MongoDB\Collection;
+use MongoDB\Driver\ReadPreference;
 use MongoDB\Laravel\Tests\TestCase;
 
 use function file_get_contents;
@@ -46,6 +48,19 @@ class QueryBuilderTest extends TestCase
         $db->table('theaters')->raw()->drop();
 
         parent::tearDown();
+    }
+
+    public function testOptions(): void
+    {
+        // begin options
+        $result = DB::connection('mongodb')
+            ->table('movies')
+            ->where('year', 2000)
+            ->options(['comment' => 'hello'])
+            ->get();
+        // end options
+
+        $this->assertInstanceOf(\Illuminate\Support\Collection::class, $result);
     }
 
     public function testWhere(): void
@@ -198,10 +213,10 @@ class QueryBuilderTest extends TestCase
     {
         // begin query groupBy
         $result = DB::table('movies')
-           ->where('rated', 'G')
-           ->groupBy('runtime')
-           ->orderBy('runtime', 'asc')
-           ->get(['title']);
+            ->where('rated', 'G')
+            ->groupBy('runtime')
+            ->orderBy('runtime', 'asc')
+            ->get(['title']);
         // end query groupBy
 
         $this->assertInstanceOf(\Illuminate\Support\Collection::class, $result);
@@ -336,7 +351,7 @@ class QueryBuilderTest extends TestCase
     {
         // begin query all
         $result = DB::table('movies')
-            ->where('movies', 'all', ['title', 'rated', 'imdb.rating'])
+            ->where('writers', 'all', ['Ben Affleck', 'Matt Damon'])
             ->get();
         // end query all
 
@@ -405,10 +420,10 @@ class QueryBuilderTest extends TestCase
         // begin query raw
         $result = DB::table('movies')
             ->whereRaw([
-                'imdb.votes' => ['$gte' => 1000 ],
+                'imdb.votes' => ['$gte' => 1000],
                 '$or' => [
                     ['imdb.rating' => ['$gt' => 7]],
-                    ['directors' => ['$in' => [ 'Yasujiro Ozu', 'Sofia Coppola', 'Federico Fellini' ]]],
+                    ['directors' => ['$in' => ['Yasujiro Ozu', 'Sofia Coppola', 'Federico Fellini']]],
                 ],
             ])->get();
         // end query raw
@@ -439,11 +454,23 @@ class QueryBuilderTest extends TestCase
         $this->assertInstanceOf(\Illuminate\Support\Collection::class, $result);
     }
 
+    public function testReadPreference(): void
+    {
+        // begin query read pref
+        $result = DB::table('movies')
+            ->where('runtime', '>', 240)
+            ->readPreference(ReadPreference::SECONDARY_PREFERRED)
+            ->get();
+        // end query read pref
+
+        $this->assertInstanceOf(\Illuminate\Support\Collection::class, $result);
+    }
+
     public function testNear(): void
     {
         $this->importTheaters();
 
-       // begin query near
+        // begin query near
         $results = DB::table('theaters')
             ->where('location.geo', 'near', [
                 '$geometry' => [
@@ -561,11 +588,34 @@ class QueryBuilderTest extends TestCase
                 [
                     'plot' => 'An autobiographical movie',
                     'year' => 1998,
-                    'writers' => [ 'Will Hunting' ],
+                    'writers' => ['Will Hunting'],
                 ],
                 ['upsert' => true],
             );
         // end update upsert
+
+        $this->assertIsInt($result);
+    }
+
+    public function testMultiplyDivide(): void
+    {
+        // begin multiply divide
+        $result = DB::table('movies')
+            ->where('year', 2001)
+            ->multiply('imdb.votes', 5);
+
+        $result = DB::table('movies')
+            ->where('year', 2001)
+            ->divide('runtime', 2);
+        // end multiply divide
+
+        $this->assertIsInt($result);
+
+        // begin multiply with set
+        $result = DB::table('movies')
+            ->where('year', 1958)
+            ->multiply('runtime', 1.5, ['note' => 'Adds recovered footage.']);
+        // end multiply with set
 
         $this->assertIsInt($result);
     }
@@ -651,5 +701,28 @@ class QueryBuilderTest extends TestCase
         // end unset
 
         $this->assertIsInt($result);
+    }
+
+    public function testTimeSeries(): void
+    {
+        // begin time series
+        $data = [
+            [
+                'precipitation_mm' => 0.5,
+                'location' => 'New York City',
+                'timestamp' => new UTCDateTime(Carbon::create(2023, 9, 12, 0, 0, 0, 'CET')),
+            ],
+            [
+                'precipitation_mm' => 2.8,
+                'location' => 'New York City',
+                'timestamp' => new UTCDateTime(Carbon::create(2023, 9, 17, 0, 0, 0, 'CET')),
+            ],
+        ];
+
+        $result = DB::table('precipitation')
+            ->insert($data);
+        // end time series
+
+        $this->assertTrue($result);
     }
 }

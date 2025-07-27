@@ -6,10 +6,17 @@ namespace MongoDB\Laravel\Relations;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo as EloquentMorphTo;
+use Override;
 
+/**
+ * @template TRelatedModel of Model
+ * @template TDeclaringModel of Model
+ * @extends EloquentMorphTo<TRelatedModel, TDeclaringModel>
+ */
 class MorphTo extends EloquentMorphTo
 {
     /** @inheritdoc */
+    #[Override]
     public function addConstraints()
     {
         if (static::$constraints) {
@@ -25,6 +32,7 @@ class MorphTo extends EloquentMorphTo
     }
 
     /** @inheritdoc */
+    #[Override]
     protected function getResultsByType($type)
     {
         $instance = $this->createModelByType($type);
@@ -36,13 +44,8 @@ class MorphTo extends EloquentMorphTo
         return $query->whereIn($key, $this->gatherKeysByType($type, $instance->getKeyType()))->get();
     }
 
-    /**
-     * Get the name of the "where in" method for eager loading.
-     *
-     * @param string $key
-     *
-     * @return string
-     */
+    /** Get the name of the "where in" method for eager loading. */
+    #[Override]
     protected function whereInMethod(Model $model, $key)
     {
         return 'whereIn';

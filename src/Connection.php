@@ -16,14 +16,18 @@ use MongoDB\Driver\Exception\RuntimeException;
 use MongoDB\Driver\ReadPreference;
 use MongoDB\Laravel\Concerns\ManagesTransactions;
 use OutOfBoundsException;
+use Override;
 use Throwable;
 
 use function filter_var;
 use function implode;
 use function is_array;
 use function preg_match;
+use function sprintf;
 use function str_contains;
+use function trigger_error;
 
+use const E_USER_DEPRECATED;
 use const FILTER_FLAG_IPV6;
 use const FILTER_VALIDATE_IP;
 
@@ -50,6 +54,9 @@ class Connection extends BaseConnection
 
     private ?CommandSubscriber $commandSubscriber = null;
 
+    /** @var bool Whether to rename the rename "id" into "_id" for embedded documents. */
+    private bool $renameEmbeddedIdField;
+
     /**
      * Create a new database connection instance.
      */
@@ -65,9 +72,10 @@ class Connection extends BaseConnection
 
         // Create the connection
         $this->connection = $this->createConnection($dsn, $config, $options);
+        $this->database = $this->getDefaultDatabaseName($dsn, $config);
 
         // Select database
-        $this->db = $this->connection->selectDatabase($this->getDefaultDatabaseName($dsn, $config));
+        $this->db = $this->connection->getDatabase($this->database);
 
         $this->tablePrefix = $config['prefix'] ?? '';
 
@@ -76,6 +84,8 @@ class Connection extends BaseConnection
         $this->useDefaultSchemaGrammar();
 
         $this->useDefaultQueryGrammar();
+
+        $this->renameEmbeddedIdField = $config['rename_embedded_id_field'] ?? true;
     }
 
     /**
@@ -86,6 +96,7 @@ class Connection extends BaseConnection
      *
      * @return Query\Builder
      */
+    #[Override]
     public function table($table, $as = null)
     {
         $query = new Query\Builder($this, $this->getQueryGrammar(), $this->getPostProcessor());
@@ -106,6 +117,7 @@ class Connection extends BaseConnection
     }
 
     /** @inheritdoc */
+    #[Override]
     public function getSchemaBuilder()
     {
         return new Schema\Builder($this);
@@ -114,31 +126,57 @@ class Connection extends BaseConnection
     /**
      * Get the MongoDB database object.
      *
+     * @deprecated since mongodb/laravel-mongodb:5.2, use getDatabase() instead
+     *
      * @return Database
      */
     public function getMongoDB()
     {
+        trigger_error(sprintf('Since mongodb/laravel-mongodb:5.2, Method "%s()" is deprecated, use "getDatabase()" instead.', __FUNCTION__), E_USER_DEPRECATED);
+
         return $this->db;
     }
 
     /**
-     * return MongoDB object.
+     * Get the MongoDB database object.
+     *
+     * @param string|null $name Name of the database, if not provided the default database will be returned.
+     *
+     * @return Database
+     */
+    public function getDatabase(?string $name = null): Database
+    {
+        if ($name && $name !== $this->database) {
+            return $this->connection->getDatabase($name);
+        }
+
+        return $this->db;
+    }
+
+    /**
+     * Return MongoDB object.
+     *
+     * @deprecated since mongodb/laravel-mongodb:5.2, use getClient() instead
      *
      * @return Client
      */
     public function getMongoClient()
     {
-        return $this->connection;
+        trigger_error(sprintf('Since mongodb/laravel-mongodb:5.2, method "%s()" is deprecated, use "getClient()" instead.', __FUNCTION__), E_USER_DEPRECATED);
+
+        return $this->getClient();
     }
 
     /**
-     * {@inheritDoc}
+     * Get the MongoDB client.
      */
-    public function getDatabaseName()
+    public function getClient(): ?Client
     {
-        return $this->getMongoDB()->getDatabaseName();
+        return $this->connection;
     }
 
+    /** @inheritdoc  */
+    #[Override]
     public function enableQueryLog()
     {
         parent::enableQueryLog();
@@ -149,6 +187,7 @@ class Connection extends BaseConnection
         }
     }
 
+    #[Override]
     public function disableQueryLog()
     {
         parent::disableQueryLog();
@@ -159,6 +198,7 @@ class Connection extends BaseConnection
         }
     }
 
+    #[Override]
     protected function withFreshQueryLog($callback)
     {
         try {
@@ -181,7 +221,7 @@ class Connection extends BaseConnection
     protected function getDefaultDatabaseName(string $dsn, array $config): string
     {
         if (empty($config['database'])) {
-            if (! preg_match('/^mongodb(?:[+]srv)?:\\/\\/.+\\/([^?&]+)/s', $dsn, $matches)) {
+            if (! preg_match('/^mongodb(?:[+]srv)?:\\/\\/.+?\\/([^?&]+)/s', $dsn, $matches)) {
                 throw new InvalidArgumentException('Database is not properly configured.');
             }
 
@@ -217,6 +257,10 @@ class Connection extends BaseConnection
             $options['password'] = $config['password'];
         }
 
+        if (isset($config['name'])) {
+            $driverOptions += ['connectionName' => $config['name']];
+        }
+
         return new Client($dsn, $options, $driverOptions);
     }
 
@@ -229,7 +273,7 @@ class Connection extends BaseConnection
      */
     public function ping(): void
     {
-        $this->getMongoClient()->getManager()->selectServer(new ReadPreference(ReadPreference::PRIMARY_PREFERRED));
+        $this->getClient()->getManager()->selectServer(new ReadPreference(ReadPreference::PRIMARY_PREFERRED));
     }
 
     /** @inheritdoc */
@@ -303,6 +347,7 @@ class Connection extends BaseConnection
     }
 
     /** @inheritdoc */
+    #[Override]
     public function getDriverName()
     {
         return 'mongodb';
@@ -315,21 +360,26 @@ class Connection extends BaseConnection
     }
 
     /** @inheritdoc */
+    #[Override]
     protected function getDefaultPostProcessor()
     {
         return new Query\Processor();
     }
 
     /** @inheritdoc */
+    #[Override]
     protected function getDefaultQueryGrammar()
     {
-        return new Query\Grammar();
+        // Argument added in Laravel 12
+        return new Query\Grammar($this);
     }
 
     /** @inheritdoc */
+    #[Override]
     protected function getDefaultSchemaGrammar()
     {
-        return new Schema\Grammar();
+        // Argument added in Laravel 12
+        return new Schema\Grammar($this);
     }
 
     /**
@@ -359,6 +409,18 @@ class Connection extends BaseConnection
     public function __call($method, $parameters)
     {
         return $this->db->$method(...$parameters);
+    }
+
+    /** Set whether to rename "id" field into "_id" for embedded documents. */
+    public function setRenameEmbeddedIdField(bool $rename): void
+    {
+        $this->renameEmbeddedIdField = $rename;
+    }
+
+    /** Get whether to rename "id" field into "_id" for embedded documents. */
+    public function getRenameEmbeddedIdField(): bool
+    {
+        return $this->renameEmbeddedIdField;
     }
 
     /**

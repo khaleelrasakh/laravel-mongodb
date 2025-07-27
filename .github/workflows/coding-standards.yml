@@ -2,10 +2,16 @@ name: "Coding Standards"
 
 on:
   push:
+    branches:
+      - "[0-9]+.[0-9x]+"
+      - "feature/*"
   pull_request:
+    branches:
+      - "[0-9]+.[0-9x]+"
+      - "feature/*"
 
 env:
-  PHP_VERSION: "8.2"
+  PHP_VERSION: "8.4"
   DRIVER_VERSION: "stable"
 
 jobs:
@@ -49,21 +55,15 @@ jobs:
         run: "php --ri mongodb"
 
       - name: "Install dependencies with Composer"
-        uses: "ramsey/composer-install@3.0.0"
+        uses: "ramsey/composer-install@3.1.1"
         with:
           composer-options: "--no-suggest"
 
-      - name: "Format the code"
-        continue-on-error: true
-        run: |
-          mkdir .cache
-          ./vendor/bin/phpcbf
+      - name: "Validate PSR class names"
+        run: "composer dump-autoload --optimize --strict-psr"
 
       # The -q option is required until phpcs v4 is released
       - name: "Run PHP_CodeSniffer"
-        run: "vendor/bin/phpcs -q --no-colors --report=checkstyle | cs2pr"
-
-      - name: "Commit the changes"
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "apply phpcbf formatting"
+        run: |
+          mkdir .cache
+          vendor/bin/phpcs -q --no-colors --report=checkstyle | cs2pr

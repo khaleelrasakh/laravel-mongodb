@@ -7,6 +7,7 @@ namespace MongoDB\Laravel\Tests;
 use Carbon\Carbon;
 use DateTime;
 use DateTimeImmutable;
+use Illuminate\Support\Collection as LaravelCollection;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\LazyCollection;
@@ -19,10 +20,12 @@ use MongoDB\BSON\Regex;
 use MongoDB\BSON\UTCDateTime;
 use MongoDB\Collection;
 use MongoDB\Driver\Cursor;
+use MongoDB\Driver\CursorInterface;
 use MongoDB\Driver\Monitoring\CommandFailedEvent;
 use MongoDB\Driver\Monitoring\CommandStartedEvent;
 use MongoDB\Driver\Monitoring\CommandSubscriber;
 use MongoDB\Driver\Monitoring\CommandSucceededEvent;
+use MongoDB\Laravel\Connection;
 use MongoDB\Laravel\Query\Builder;
 use MongoDB\Laravel\Tests\Models\Item;
 use MongoDB\Laravel\Tests\Models\User;
@@ -32,6 +35,7 @@ use Stringable;
 use function count;
 use function key;
 use function md5;
+use function method_exists;
 use function sort;
 use function strlen;
 
@@ -41,6 +45,8 @@ class QueryBuilderTest extends TestCase
     {
         DB::table('users')->truncate();
         DB::table('items')->truncate();
+
+        parent::tearDown();
     }
 
     public function testDeleteWithId()
@@ -120,6 +126,22 @@ class QueryBuilderTest extends TestCase
         $this->assertIsArray($user->tags);
     }
 
+    #[TestWith([true])]
+    #[TestWith([false])]
+    public function testInsertWithCustomId(bool $renameEmbeddedIdField)
+    {
+        $connection = DB::connection('mongodb');
+        $connection->setRenameEmbeddedIdField($renameEmbeddedIdField);
+
+        $data = ['id' => 'abcdef', 'name' => 'John Doe'];
+
+        DB::table('users')->insert($data);
+
+        $user = User::find('abcdef');
+        $this->assertInstanceOf(User::class, $user);
+        $this->assertSame('abcdef', $user->id);
+    }
+
     public function testInsertGetId()
     {
         $id = DB::table('users')->insertGetId(['name' => 'John Doe']);
@@ -157,7 +179,7 @@ class QueryBuilderTest extends TestCase
         $id = DB::table('users')->insertGetId(['name' => 'John Doe']);
 
         $subscriber = new class implements CommandSubscriber {
-            public function commandStarted(CommandStartedEvent $event)
+            public function commandStarted(CommandStartedEvent $event): void
             {
                 if ($event->getCommandName() !== 'find') {
                     return;
@@ -167,11 +189,11 @@ class QueryBuilderTest extends TestCase
                 Assert::assertSame(1000, $event->getCommand()->maxTimeMS);
             }
 
-            public function commandFailed(CommandFailedEvent $event)
+            public function commandFailed(CommandFailedEvent $event): void
             {
             }
 
-            public function commandSucceeded(CommandSucceededEvent $event)
+            public function commandSucceeded(CommandSucceededEvent $event): void
             {
             }
         };
@@ -330,6 +352,93 @@ class QueryBuilderTest extends TestCase
         $results = DB::table('users')->whereRaw(['age' => 20])->get();
         $this->assertCount(1, $results);
         $this->assertEquals('Jane Doe', $results[0]->name);
+    }
+
+    public function testRawResultRenameId()
+    {
+        $connection = DB::connection('mongodb');
+        self::assertInstanceOf(Connection::class, $connection);
+
+        $date = Carbon::createFromDate(1986, 12, 31)->setTime(12, 0, 0);
+        User::insert([
+            ['id' => 1, 'name' => 'Jane Doe', 'address' => ['id' => 11, 'city' => 'Ghent'], 'birthday' => $date],
+            ['id' => 2, 'name' => 'John Doe', 'address' => ['id' => 12, 'city' => 'Brussels'], 'birthday' => $date],
+        ]);
+
+        // Using raw database query, result is not altered
+        $results = $connection->table('users')->raw(fn (Collection $collection) => $collection->find([]));
+        self::assertInstanceOf(CursorInterface::class, $results);
+        $results = $results->toArray();
+        self::assertCount(2, $results);
+
+        self::assertObjectHasProperty('_id', $results[0]);
+        self::assertObjectNotHasProperty('id', $results[0]);
+        self::assertSame(1, $results[0]->_id);
+
+        self::assertObjectHasProperty('_id', $results[0]->address);
+        self::assertObjectNotHasProperty('id', $results[0]->address);
+        self::assertSame(11, $results[0]->address->_id);
+
+        self::assertInstanceOf(UTCDateTime::class, $results[0]->birthday);
+
+        // Using Eloquent query, result is transformed
+        self::assertTrue($connection->getRenameEmbeddedIdField());
+        $results = User::raw(fn (Collection $collection) => $collection->find([]));
+        self::assertInstanceOf(LaravelCollection::class, $results);
+        self::assertCount(2, $results);
+
+        $attributes = $results->first()->getAttributes();
+        self::assertArrayHasKey('id', $attributes);
+        self::assertArrayNotHasKey('_id', $attributes);
+        self::assertSame(1, $attributes['id']);
+
+        self::assertArrayHasKey('id', $attributes['address']);
+        self::assertArrayNotHasKey('_id', $attributes['address']);
+        self::assertSame(11, $attributes['address']['id']);
+
+        self::assertEquals($date, $attributes['birthday']);
+
+        // Single result
+        $result = User::raw(fn (Collection $collection) => $collection->findOne([], ['typeMap' => ['root' => 'object', 'document' => 'array']]));
+        self::assertInstanceOf(User::class, $result);
+
+        $attributes = $result->getAttributes();
+        self::assertArrayHasKey('id', $attributes);
+        self::assertArrayNotHasKey('_id', $attributes);
+        self::assertSame(1, $attributes['id']);
+
+        self::assertArrayHasKey('id', $attributes['address']);
+        self::assertArrayNotHasKey('_id', $attributes['address']);
+        self::assertSame(11, $attributes['address']['id']);
+
+        // Change the renameEmbeddedIdField option
+        $connection->setRenameEmbeddedIdField(false);
+
+        $results = User::raw(fn (Collection $collection) => $collection->find([]));
+        self::assertInstanceOf(LaravelCollection::class, $results);
+        self::assertCount(2, $results);
+
+        $attributes = $results->first()->getAttributes();
+        self::assertArrayHasKey('id', $attributes);
+        self::assertArrayNotHasKey('_id', $attributes);
+        self::assertSame(1, $attributes['id']);
+
+        self::assertArrayHasKey('_id', $attributes['address']);
+        self::assertArrayNotHasKey('id', $attributes['address']);
+        self::assertSame(11, $attributes['address']['_id']);
+
+        // Single result
+        $result = User::raw(fn (Collection $collection) => $collection->findOne([]));
+        self::assertInstanceOf(User::class, $result);
+
+        $attributes = $result->getAttributes();
+        self::assertArrayHasKey('id', $attributes);
+        self::assertArrayNotHasKey('_id', $attributes);
+        self::assertSame(1, $attributes['id']);
+
+        self::assertArrayHasKey('_id', $attributes['address']);
+        self::assertArrayNotHasKey('id', $attributes['address']);
+        self::assertSame(11, $attributes['address']['_id']);
     }
 
     public function testPush()
@@ -615,6 +724,59 @@ class QueryBuilderTest extends TestCase
         $this->assertEquals(1, DB::table('items')->min('amount.*.hidden'));
         $this->assertEquals(35, DB::table('items')->max('amount.*.hidden'));
         $this->assertEquals(12, DB::table('items')->avg('amount.*.hidden'));
+    }
+
+    public function testAggregateGroupBy()
+    {
+        DB::table('users')->insert([
+            ['name' => 'John Doe', 'role' => 'admin', 'score' => 1, 'active' => true],
+            ['name' => 'Jane Doe', 'role' => 'admin', 'score' => 2, 'active' => true],
+            ['name' => 'Robert Roe', 'role' => 'user', 'score' => 4],
+        ]);
+
+        $results = DB::table('users')->groupBy('role')->orderBy('role')->aggregateByGroup('count');
+        $this->assertInstanceOf(LaravelCollection::class, $results);
+        $this->assertEquals([(object) ['role' => 'admin', 'aggregate' => 2], (object) ['role' => 'user', 'aggregate' => 1]], $results->toArray());
+
+        $results = DB::table('users')->groupBy('role')->orderBy('role')->aggregateByGroup('count', ['active']);
+        $this->assertInstanceOf(LaravelCollection::class, $results);
+        $this->assertEquals([(object) ['role' => 'admin', 'aggregate' => 1], (object) ['role' => 'user', 'aggregate' => 0]], $results->toArray());
+
+        $results = DB::table('users')->groupBy('role')->orderBy('role')->aggregateByGroup('max', ['score']);
+        $this->assertInstanceOf(LaravelCollection::class, $results);
+        $this->assertEquals([(object) ['role' => 'admin', 'aggregate' => 2], (object) ['role' => 'user', 'aggregate' => 4]], $results->toArray());
+
+        if (! method_exists(Builder::class, 'countByGroup')) {
+            $this->markTestSkipped('*byGroup functions require Laravel v11.38+');
+        }
+
+        $results = DB::table('users')->groupBy('role')->orderBy('role')->countByGroup();
+        $this->assertInstanceOf(LaravelCollection::class, $results);
+        $this->assertEquals([(object) ['role' => 'admin', 'aggregate' => 2], (object) ['role' => 'user', 'aggregate' => 1]], $results->toArray());
+
+        $results = DB::table('users')->groupBy('role')->orderBy('role')->maxByGroup('score');
+        $this->assertInstanceOf(LaravelCollection::class, $results);
+        $this->assertEquals([(object) ['role' => 'admin', 'aggregate' => 2], (object) ['role' => 'user', 'aggregate' => 4]], $results->toArray());
+
+        $results = DB::table('users')->groupBy('role')->orderBy('role')->minByGroup('score');
+        $this->assertInstanceOf(LaravelCollection::class, $results);
+        $this->assertEquals([(object) ['role' => 'admin', 'aggregate' => 1], (object) ['role' => 'user', 'aggregate' => 4]], $results->toArray());
+
+        $results = DB::table('users')->groupBy('role')->orderBy('role')->sumByGroup('score');
+        $this->assertInstanceOf(LaravelCollection::class, $results);
+        $this->assertEquals([(object) ['role' => 'admin', 'aggregate' => 3], (object) ['role' => 'user', 'aggregate' => 4]], $results->toArray());
+
+        $results = DB::table('users')->groupBy('role')->orderBy('role')->avgByGroup('score');
+        $this->assertInstanceOf(LaravelCollection::class, $results);
+        $this->assertEquals([(object) ['role' => 'admin', 'aggregate' => 1.5], (object) ['role' => 'user', 'aggregate' => 4]], $results->toArray());
+    }
+
+    public function testAggregateByGroupException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Aggregating by group requires zero or one columns.');
+
+        DB::table('users')->aggregateByGroup('max', ['foo', 'bar']);
     }
 
     public function testUpdateWithUpsert()
@@ -904,6 +1066,55 @@ class QueryBuilderTest extends TestCase
         $this->assertNull($user->age);
         $user = DB::table('users')->where('name', 'Mark Moe')->first();
         $this->assertEquals(1, $user->age);
+    }
+
+    public function testMultiplyAndDivide()
+    {
+        DB::table('users')->insert([
+            ['name' => 'John Doe', 'salary' => 88000, 'note' => 'senior'],
+            ['name' => 'Jane Doe', 'salary' => 64000, 'note' => 'junior'],
+            ['name' => 'Robert Roe', 'salary' => null],
+            ['name' => 'Mark Moe'],
+        ]);
+
+        $user = DB::table('users')->where('name', 'John Doe')->first();
+        $this->assertEquals(88000, $user->salary);
+
+        DB::table('users')->where('name', 'John Doe')->multiply('salary', 1);
+        $user = DB::table('users')->where('name', 'John Doe')->first();
+        $this->assertEquals(88000, $user->salary);
+
+        DB::table('users')->where('name', 'John Doe')->divide('salary', 1);
+        $user = DB::table('users')->where('name', 'John Doe')->first();
+        $this->assertEquals(88000, $user->salary);
+
+        DB::table('users')->where('name', 'John Doe')->multiply('salary', 2);
+        $user = DB::table('users')->where('name', 'John Doe')->first();
+        $this->assertEquals(176000, $user->salary);
+
+        DB::table('users')->where('name', 'John Doe')->divide('salary', 2);
+        $user = DB::table('users')->where('name', 'John Doe')->first();
+        $this->assertEquals(88000, $user->salary);
+
+        DB::table('users')->where('name', 'Jane Doe')->multiply('salary', 10, ['note' => 'senior']);
+        $user = DB::table('users')->where('name', 'Jane Doe')->first();
+        $this->assertEquals(640000, $user->salary);
+        $this->assertEquals('senior', $user->note);
+
+        DB::table('users')->where('name', 'John Doe')->divide('salary', 2, ['note' => 'junior']);
+        $user = DB::table('users')->where('name', 'John Doe')->first();
+        $this->assertEquals(44000, $user->salary);
+        $this->assertEquals('junior', $user->note);
+
+        DB::table('users')->multiply('salary', 1);
+        $user = DB::table('users')->where('name', 'John Doe')->first();
+        $this->assertEquals(44000, $user->salary);
+        $user = DB::table('users')->where('name', 'Jane Doe')->first();
+        $this->assertEquals(640000, $user->salary);
+        $user = DB::table('users')->where('name', 'Robert Roe')->first();
+        $this->assertNull($user->salary);
+        $user = DB::table('users')->where('name', 'Mark Moe')->first();
+        $this->assertFalse(isset($user->salary));
     }
 
     public function testProjections()

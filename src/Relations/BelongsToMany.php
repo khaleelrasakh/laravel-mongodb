@@ -10,17 +10,23 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany as EloquentBelongsToMany;
 use Illuminate\Support\Arr;
 use MongoDB\Laravel\Eloquent\Model as DocumentModel;
+use Override;
 
 use function array_diff;
 use function array_keys;
 use function array_map;
-use function array_merge;
+use function array_replace;
 use function array_values;
 use function assert;
 use function count;
 use function in_array;
 use function is_numeric;
 
+/**
+ * @template TRelatedModel of Model
+ * @template TDeclaringModel of Model
+ * @extends EloquentBelongsToMany<TRelatedModel, TDeclaringModel>
+ */
 class BelongsToMany extends EloquentBelongsToMany
 {
     /**
@@ -34,12 +40,14 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function getRelationExistenceQuery(Builder $query, Builder $parentQuery, $columns = ['*'])
     {
         return $query;
     }
 
     /** @inheritdoc */
+    #[Override]
     protected function hydratePivotRelation(array $models)
     {
         // Do nothing.
@@ -56,12 +64,14 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     protected function shouldSelect(array $columns = ['*'])
     {
         return $columns;
     }
 
     /** @inheritdoc */
+    #[Override]
     public function addConstraints()
     {
         if (static::$constraints) {
@@ -84,6 +94,7 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function save(Model $model, array $pivotAttributes = [], $touch = true)
     {
         $model->save(['touch' => false]);
@@ -94,6 +105,7 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function create(array $attributes = [], array $joining = [], $touch = true)
     {
         $instance = $this->related->newInstance($attributes);
@@ -109,6 +121,7 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function sync($ids, $detaching = true)
     {
         $changes = [
@@ -159,7 +172,7 @@ class BelongsToMany extends EloquentBelongsToMany
         // Now we are finally ready to attach the new records. Note that we'll disable
         // touching until after the entire operation is complete so we don't fire a
         // ton of touch operations until we are totally done syncing the records.
-        $changes = array_merge(
+        $changes = array_replace(
             $changes,
             $this->attachNew($records, $current, false),
         );
@@ -172,6 +185,7 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function updateExistingPivot($id, array $attributes, $touch = true)
     {
         // Do nothing, we have no pivot table.
@@ -179,6 +193,7 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function attach($id, array $attributes = [], $touch = true)
     {
         if ($id instanceof Model) {
@@ -219,6 +234,7 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function detach($ids = [], $touch = true)
     {
         if ($ids instanceof Model) {
@@ -259,6 +275,7 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     protected function buildDictionary(Collection $results)
     {
         $foreign = $this->foreignPivotKey;
@@ -278,6 +295,7 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function newPivotQuery()
     {
         return $this->newRelatedQuery();
@@ -304,12 +322,14 @@ class BelongsToMany extends EloquentBelongsToMany
     }
 
     /** @inheritdoc */
+    #[Override]
     public function getQualifiedForeignPivotKeyName()
     {
         return $this->foreignPivotKey;
     }
 
     /** @inheritdoc */
+    #[Override]
     public function getQualifiedRelatedPivotKeyName()
     {
         return $this->relatedPivotKey;
@@ -318,10 +338,9 @@ class BelongsToMany extends EloquentBelongsToMany
     /**
      * Get the name of the "where in" method for eager loading.
      *
-     * @param string $key
-     *
-     * @return string
+     * @inheritdoc
      */
+    #[Override]
     protected function whereInMethod(Model $model, $key)
     {
         return 'whereIn';

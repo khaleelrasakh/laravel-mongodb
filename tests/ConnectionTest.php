@@ -48,23 +48,23 @@ class ConnectionTest extends TestCase
     {
         $connection = DB::connection('mongodb');
         $this->assertInstanceOf(Connection::class, $connection);
-        $client = $connection->getMongoClient();
+        $client = $connection->getClient();
         $this->assertInstanceOf(Client::class, $client);
         $connection->disconnect();
-        $client = $connection->getMongoClient();
+        $client = $connection->getClient();
         $this->assertNull($client);
         DB::purge('mongodb');
         $connection = DB::connection('mongodb');
         $this->assertInstanceOf(Connection::class, $connection);
-        $client = $connection->getMongoClient();
+        $client = $connection->getClient();
         $this->assertInstanceOf(Client::class, $client);
     }
 
     public function testDb()
     {
         $connection = DB::connection('mongodb');
-        $this->assertInstanceOf(Database::class, $connection->getMongoDB());
-        $this->assertInstanceOf(Client::class, $connection->getMongoClient());
+        $this->assertInstanceOf(Database::class, $connection->getDatabase());
+        $this->assertInstanceOf(Client::class, $connection->getClient());
     }
 
     public static function dataConnectionConfig(): Generator
@@ -190,18 +190,61 @@ class ConnectionTest extends TestCase
             'expectedDatabaseName' => 'tests',
             'config' => ['dsn' => 'mongodb://some-host:12345/tests'],
         ];
+
+        yield 'Database is extracted from DSN with CA path in options' => [
+            'expectedUri' => 'mongodb://some-host:12345/tests?tls=true&tlsCAFile=/path/to/ca.pem&retryWrites=false',
+            'expectedDatabaseName' => 'tests',
+            'config' => ['dsn' => 'mongodb://some-host:12345/tests?tls=true&tlsCAFile=/path/to/ca.pem&retryWrites=false'],
+        ];
     }
 
     #[DataProvider('dataConnectionConfig')]
     public function testConnectionConfig(string $expectedUri, string $expectedDatabaseName, array $config): void
     {
         $connection = new Connection($config);
-        $client     = $connection->getMongoClient();
+        $client     = $connection->getClient();
 
         $this->assertSame($expectedUri, (string) $client);
-        $this->assertSame($expectedDatabaseName, $connection->getMongoDB()->getDatabaseName());
+        $this->assertSame($expectedDatabaseName, $connection->getDatabase()->getDatabaseName());
         $this->assertSame('foo', $connection->getCollection('foo')->getCollectionName());
         $this->assertSame('foo', $connection->table('foo')->raw()->getCollectionName());
+    }
+
+    public function testLegacyGetMongoClient(): void
+    {
+        $connection = DB::connection('mongodb');
+        $expected = $connection->getClient();
+
+        $this->assertSame($expected, $connection->getMongoClient());
+    }
+
+    public function testLegacyGetMongoDB(): void
+    {
+        $connection = DB::connection('mongodb');
+        $expected = $connection->getDatabase();
+
+        $this->assertSame($expected, $connection->getMongoDB());
+    }
+
+    public function testGetDatabase(): void
+    {
+        $connection = DB::connection('mongodb');
+        $defaultName = env('MONGODB_DATABASE', 'unittest');
+        $database = $connection->getDatabase();
+
+        $this->assertInstanceOf(Database::class, $database);
+        $this->assertSame($defaultName, $database->getDatabaseName());
+        $this->assertSame($database, $connection->getDatabase($defaultName), 'Same instance for the default database');
+    }
+
+    public function testGetOtherDatabase(): void
+    {
+        $connection = DB::connection('mongodb');
+        $name = 'other_random_database';
+        $database = $connection->getDatabase($name);
+
+        $this->assertInstanceOf(Database::class, $database);
+        $this->assertSame($name, $database->getDatabaseName($name));
     }
 
     public function testConnectionWithoutConfiguredDatabase(): void
@@ -252,6 +295,8 @@ class ConnectionTest extends TestCase
         DB::table('items')->get();
         $this->assertCount(1, $logs = DB::getQueryLog());
         $this->assertJsonStringEqualsJsonString('{"find":"items","filter":{}}', $logs[0]['query']);
+        $this->assertLessThan(10, $logs[0]['time'], 'Query time is in milliseconds');
+        $this->assertGreaterThan(0.01, $logs[0]['time'], 'Query time is in milliseconds');
 
         DB::table('items')->insert(['id' => $id = new ObjectId(), 'name' => 'test']);
         $this->assertCount(2, $logs = DB::getQueryLog());
@@ -275,6 +320,34 @@ class ConnectionTest extends TestCase
         } catch (BulkWriteException) {
             $this->assertCount(6, DB::getQueryLog());
         }
+    }
+
+    public function testQueryLogWithMultipleClients()
+    {
+        $connection = DB::connection('mongodb');
+        $this->assertInstanceOf(Connection::class, $connection);
+
+        // Create a second connection with the same config as the first
+        // Make sure to change the name as it's used as a connection identifier
+        $config = $connection->getConfig();
+        $config['name'] = 'mongodb2';
+        $secondConnection = new Connection($config);
+
+        $connection->enableQueryLog();
+        $secondConnection->enableQueryLog();
+
+        $this->assertCount(0, $connection->getQueryLog());
+        $this->assertCount(0, $secondConnection->getQueryLog());
+
+        $connection->table('items')->get();
+
+        $this->assertCount(1, $connection->getQueryLog());
+        $this->assertCount(0, $secondConnection->getQueryLog());
+
+        $secondConnection->table('items')->get();
+
+        $this->assertCount(1, $connection->getQueryLog());
+        $this->assertCount(1, $secondConnection->getQueryLog());
     }
 
     public function testDisableQueryLog()
@@ -322,8 +395,8 @@ class ConnectionTest extends TestCase
             'dsn'      => env('MONGODB_URI', 'mongodb://127.0.0.1/'),
             'database' => 'unittest',
             'options'  => [
-                'connectTimeoutMS'         => 100,
-                'serverSelectionTimeoutMS' => 250,
+                'connectTimeoutMS'         => 1000,
+                'serverSelectionTimeoutMS' => 6000,
             ],
         ];
 

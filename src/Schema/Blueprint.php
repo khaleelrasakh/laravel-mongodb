@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace MongoDB\Laravel\Schema;
 
-use Illuminate\Database\Connection;
-use Illuminate\Database\Schema\Blueprint as SchemaBlueprint;
+use Illuminate\Database\Schema\Blueprint as BaseBlueprint;
 use MongoDB\Collection;
+use MongoDB\Laravel\Connection;
+use Override;
 
 use function array_flip;
+use function array_merge;
 use function implode;
 use function in_array;
 use function is_array;
@@ -16,17 +18,14 @@ use function is_int;
 use function is_string;
 use function key;
 
-class Blueprint extends SchemaBlueprint
+/** @property Connection $connection */
+class Blueprint extends BaseBlueprint
 {
-    /**
-     * The MongoConnection object for this blueprint.
-     *
-     * @var Connection
-     */
-    protected $connection;
+    // Import $connection property and constructor for Laravel 12 compatibility
+    use BlueprintLaravelCompatibility;
 
     /**
-     * The Collection object for this blueprint.
+     * The MongoDB collection object for this blueprint.
      *
      * @var Collection
      */
@@ -39,19 +38,8 @@ class Blueprint extends SchemaBlueprint
      */
     protected $columns = [];
 
-    /**
-     * Create a new schema blueprint.
-     */
-    public function __construct(Connection $connection, string $collection)
-    {
-        parent::__construct($collection);
-
-        $this->connection = $connection;
-
-        $this->collection = $this->connection->getCollection($collection);
-    }
-
     /** @inheritdoc */
+    #[Override]
     public function index($columns = null, $name = null, $algorithm = null, $options = [])
     {
         $columns = $this->fluent($columns);
@@ -78,12 +66,14 @@ class Blueprint extends SchemaBlueprint
     }
 
     /** @inheritdoc */
+    #[Override]
     public function primary($columns = null, $name = null, $algorithm = null, $options = [])
     {
         return $this->unique($columns, $name, $algorithm, $options);
     }
 
     /** @inheritdoc */
+    #[Override]
     public function dropIndex($index = null)
     {
         $index = $this->transformColumns($index);
@@ -132,6 +122,24 @@ class Blueprint extends SchemaBlueprint
         return false;
     }
 
+    public function jsonSchema(
+        array $schema = [],
+        ?string $validationLevel = null,
+        ?string $validationAction = null,
+    ): void {
+        $options = array_merge(
+            [
+                'validator' => [
+                    '$jsonSchema' => $schema,
+                ],
+            ],
+            $validationLevel ? ['validationLevel' => $validationLevel] : [],
+            $validationAction ? ['validationAction' => $validationAction] : [],
+        );
+
+        $this->connection->getDatabase()->modifyCollection($this->collection->getCollectionName(), $options);
+    }
+
     /**
      * @param  string|array $indexOrColumns
      *
@@ -166,6 +174,7 @@ class Blueprint extends SchemaBlueprint
     }
 
     /** @inheritdoc */
+    #[Override]
     public function unique($columns = null, $name = null, $algorithm = null, $options = [])
     {
         $columns = $this->fluent($columns);
@@ -247,17 +256,19 @@ class Blueprint extends SchemaBlueprint
      *
      * @return void
      */
+    #[Override]
     public function create($options = [])
     {
         $collection = $this->collection->getCollectionName();
 
-        $db = $this->connection->getMongoDB();
+        $db = $this->connection->getDatabase();
 
         // Ensure the collection is created.
         $db->createCollection($collection, $options);
     }
 
     /** @inheritdoc */
+    #[Override]
     public function drop()
     {
         $this->collection->drop();
@@ -266,6 +277,7 @@ class Blueprint extends SchemaBlueprint
     }
 
     /** @inheritdoc */
+    #[Override]
     public function renameColumn($from, $to)
     {
         $this->collection->updateMany([$from => ['$exists' => true]], ['$rename' => [$from => $to]]);
@@ -274,6 +286,7 @@ class Blueprint extends SchemaBlueprint
     }
 
     /** @inheritdoc */
+    #[Override]
     public function addColumn($type, $name, array $parameters = [])
     {
         $this->fluent($name);
@@ -299,6 +312,52 @@ class Blueprint extends SchemaBlueprint
         $options['unique'] = true;
 
         $this->index($columns, null, null, $options);
+
+        return $this;
+    }
+
+    /**
+     * Create an Atlas Search Index.
+     *
+     * @see https://www.mongodb.com/docs/manual/reference/command/createSearchIndexes/#std-label-search-index-definition-create
+     *
+     * @phpstan-param array{
+     *      analyzer?: string,
+     *      analyzers?: list<array>,
+     *      searchAnalyzer?: string,
+     *      mappings: array{dynamic: true} | array{dynamic?: bool, fields: array<string, array>},
+     *      storedSource?: bool|array,
+     *      synonyms?: list<array>,
+     *      ...
+     *  } $definition
+     */
+    public function searchIndex(array $definition, string $name = 'default'): static
+    {
+        $this->collection->createSearchIndex($definition, ['name' => $name, 'type' => 'search']);
+
+        return $this;
+    }
+
+    /**
+     * Create an Atlas Vector Search Index.
+     *
+     * @see https://www.mongodb.com/docs/manual/reference/command/createSearchIndexes/#std-label-vector-search-index-definition-create
+     *
+     * @phpstan-param array{fields: array<string, array{type: string, ...}>} $definition
+     */
+    public function vectorSearchIndex(array $definition, string $name = 'default'): static
+    {
+        $this->collection->createSearchIndex($definition, ['name' => $name, 'type' => 'vectorSearch']);
+
+        return $this;
+    }
+
+    /**
+     * Drop an Atlas Search or Vector Search index
+     */
+    public function dropSearchIndex(string $name): static
+    {
+        $this->collection->dropSearchIndex($name);
 
         return $this;
     }

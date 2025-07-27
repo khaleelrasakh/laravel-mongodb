@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace MongoDB\Laravel\Eloquent;
 
 use BackedEnum;
-use Carbon\Carbon;
 use Carbon\CarbonInterface;
 use DateTimeInterface;
 use DateTimeZone;
@@ -30,7 +29,7 @@ use ValueError;
 
 use function array_key_exists;
 use function array_keys;
-use function array_merge;
+use function array_replace;
 use function array_unique;
 use function array_values;
 use function class_basename;
@@ -51,6 +50,7 @@ use function strcmp;
 use function strlen;
 use function var_export;
 
+/** @mixin Builder */
 trait DocumentModel
 {
     use HybridRelations;
@@ -128,7 +128,7 @@ trait DocumentModel
      *
      * @param  mixed $value
      */
-    protected function asDateTime($value): Carbon
+    protected function asDateTime($value): DateTimeInterface
     {
         // Convert UTCDateTime instances to Carbon.
         if ($value instanceof UTCDateTime) {
@@ -192,7 +192,7 @@ trait DocumentModel
         // to a Carbon or CarbonImmutable instance.
         // @see Model::setAttribute()
         if ($this->hasCast($key) && $value instanceof CarbonInterface) {
-            $value->settings(array_merge($value->getSettings(), ['toStringFormat' => $this->getDateFormat()]));
+            $value->settings(array_replace($value->getSettings(), ['toStringFormat' => $this->getDateFormat()]));
 
             // "date" cast resets the time to 00:00:00.
             $castType = $this->getCasts()[$key];

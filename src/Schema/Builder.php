@@ -5,25 +5,42 @@ declare(strict_types=1);
 namespace MongoDB\Laravel\Schema;
 
 use Closure;
+use MongoDB\Collection;
+use MongoDB\Driver\Exception\ServerException;
+use MongoDB\Laravel\Connection;
 use MongoDB\Model\CollectionInfo;
 use MongoDB\Model\IndexInfo;
+use Override;
 
+use function array_column;
 use function array_fill_keys;
 use function array_filter;
+use function array_key_exists;
 use function array_keys;
 use function array_map;
+use function array_merge;
+use function array_values;
 use function assert;
 use function count;
 use function current;
+use function explode;
 use function implode;
 use function in_array;
+use function is_array;
+use function is_bool;
+use function is_string;
 use function iterator_to_array;
 use function sort;
 use function sprintf;
+use function str_contains;
 use function str_ends_with;
 use function substr;
+use function trigger_error;
 use function usort;
 
+use const E_USER_DEPRECATED;
+
+/** @property Connection $connection */
 class Builder extends \Illuminate\Database\Schema\Builder
 {
     /**
@@ -38,7 +55,7 @@ class Builder extends \Illuminate\Database\Schema\Builder
     }
 
     /**
-     * Check if columns exists in the collection schema.
+     * Check if columns exist in the collection schema.
      *
      * @param string   $table
      * @param string[] $columns
@@ -72,7 +89,7 @@ class Builder extends \Illuminate\Database\Schema\Builder
      */
     public function hasCollection($name)
     {
-        $db = $this->connection->getMongoDB();
+        $db = $this->connection->getDatabase();
 
         $collections = iterator_to_array($db->listCollections([
             'filter' => ['name' => $name],
@@ -82,12 +99,14 @@ class Builder extends \Illuminate\Database\Schema\Builder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function hasTable($table)
     {
         return $this->hasCollection($table);
     }
 
     /** @inheritdoc */
+    #[Override]
     public function table($table, Closure $callback)
     {
         $blueprint = $this->createBlueprint($table);
@@ -98,6 +117,7 @@ class Builder extends \Illuminate\Database\Schema\Builder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function create($table, ?Closure $callback = null, array $options = [])
     {
         $blueprint = $this->createBlueprint($table);
@@ -110,6 +130,7 @@ class Builder extends \Illuminate\Database\Schema\Builder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function dropIfExists($table)
     {
         if ($this->hasCollection($table)) {
@@ -118,6 +139,7 @@ class Builder extends \Illuminate\Database\Schema\Builder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function drop($table)
     {
         $blueprint = $this->createBlueprint($table);
@@ -125,54 +147,82 @@ class Builder extends \Illuminate\Database\Schema\Builder
         $blueprint->drop();
     }
 
-    /** @inheritdoc */
+    /**
+     * @inheritdoc
+     *
+     * Drops the entire database instead of deleting each collection individually.
+     *
+     * In MongoDB, dropping the whole database is much faster than dropping collections
+     * one by one. The database will be automatically recreated when a new connection
+     * writes to it.
+     */
+    #[Override]
     public function dropAllTables()
     {
-        foreach ($this->getAllCollections() as $collection) {
-            $this->drop($collection);
-        }
+        $this->connection->getDatabase()->drop();
     }
 
-    public function getTables()
+    /**
+     * @param string|null $schema Database name
+     *
+     * @inheritdoc
+     */
+    #[Override]
+    public function getTables($schema = null)
     {
-        $db = $this->connection->getMongoDB();
+        return $this->getCollectionRows('collection', $schema);
+    }
+
+    /**
+     * @param  string|null $schema Database name
+     *
+     * @inheritdoc
+     */
+    #[Override]
+    public function getViews($schema = null)
+    {
+        return $this->getCollectionRows('view', $schema);
+    }
+
+    /**
+     * @param string|null $schema
+     * @param bool        $schemaQualified If a schema is provided, prefix the collection names with the schema name
+     *
+     * @return array
+     */
+    #[Override]
+    public function getTableListing($schema = null, $schemaQualified = false)
+    {
         $collections = [];
 
-        foreach ($db->listCollectionNames() as $collectionName) {
-            $stats = $db->selectCollection($collectionName)->aggregate([
-                ['$collStats' => ['storageStats' => ['scale' => 1]]],
-                ['$project' => ['storageStats.totalSize' => 1]],
-            ])->toArray();
-
-            $collections[] = [
-                'name' => $collectionName,
-                'schema' => null,
-                'size' => $stats[0]?->storageStats?->totalSize ?? null,
-                'comment' => null,
-                'collation' => null,
-                'engine' => null,
-            ];
+        if ($schema === null || is_string($schema)) {
+            $collections[$schema ?? 0] = iterator_to_array($this->connection->getDatabase($schema)->listCollectionNames());
+        } elseif (is_array($schema)) {
+            foreach ($schema as $db) {
+                $collections[$db] = iterator_to_array($this->connection->getDatabase($db)->listCollectionNames());
+            }
         }
 
-        usort($collections, function ($a, $b) {
-            return $a['name'] <=> $b['name'];
-        });
+        if ($schema && $schemaQualified) {
+            $collections = array_map(fn ($db, $collections) => array_map(static fn ($collection) => $db . '.' . $collection, $collections), array_keys($collections), $collections);
+        }
 
-        return $collections;
-    }
-
-    public function getTableListing()
-    {
-        $collections = iterator_to_array($this->connection->getMongoDB()->listCollectionNames());
+        $collections = array_merge(...array_values($collections));
 
         sort($collections);
 
         return $collections;
     }
 
+    #[Override]
     public function getColumns($table)
     {
-        $stats = $this->connection->getMongoDB()->selectCollection($table)->aggregate([
+        $db = null;
+        if (str_contains($table, '.')) {
+            [$db, $table] = explode('.', $table, 2);
+        }
+
+        $stats = $this->connection->getDatabase($db)->getCollection($table)->aggregate([
             // Sample 1,000 documents to get a representative sample of the collection
             ['$sample' => ['size' => 1_000]],
             // Convert each document to an array of fields
@@ -223,11 +273,14 @@ class Builder extends \Illuminate\Database\Schema\Builder
         return $columns;
     }
 
+    #[Override]
     public function getIndexes($table)
     {
-        $indexes = $this->connection->getMongoDB()->selectCollection($table)->listIndexes();
-
+        $collection = $this->connection->getDatabase()->selectCollection($table);
+        assert($collection instanceof Collection);
         $indexList = [];
+
+        $indexes = $collection->listIndexes();
         foreach ($indexes as $index) {
             assert($index instanceof IndexInfo);
             $indexList[] = [
@@ -238,21 +291,55 @@ class Builder extends \Illuminate\Database\Schema\Builder
                     $index->isText() => 'text',
                     $index->is2dSphere() => '2dsphere',
                     $index->isTtl() => 'ttl',
-                    default => 'default',
+                    default => null,
                 },
                 'unique' => $index->isUnique(),
             ];
         }
 
+        try {
+            $indexes = $collection->listSearchIndexes(['typeMap' => ['root' => 'array', 'array' => 'array', 'document' => 'array']]);
+            foreach ($indexes as $index) {
+                // Status 'DOES_NOT_EXIST' means the index has been dropped but is still in the process of being removed
+                if ($index['status'] === 'DOES_NOT_EXIST') {
+                    continue;
+                }
+
+                $indexList[] = [
+                    'name' => $index['name'],
+                    'columns' => match ($index['type']) {
+                        'search' => array_merge(
+                            $index['latestDefinition']['mappings']['dynamic'] ? ['dynamic'] : [],
+                            array_keys($index['latestDefinition']['mappings']['fields'] ?? []),
+                        ),
+                        'vectorSearch' => array_column($index['latestDefinition']['fields'], 'path'),
+                    },
+                    'type' => $index['type'],
+                    'primary' => false,
+                    'unique' => false,
+                ];
+            }
+        } catch (ServerException $exception) {
+            if (! self::isAtlasSearchNotSupportedException($exception)) {
+                throw $exception;
+            }
+        }
+
         return $indexList;
     }
 
+    #[Override]
     public function getForeignKeys($table)
     {
         return [];
     }
 
-    /** @inheritdoc */
+    /**
+     * @return Blueprint
+     *
+     * @inheritdoc
+     */
+    #[Override]
     protected function createBlueprint($table, ?Closure $callback = null)
     {
         return new Blueprint($this->connection, $table);
@@ -267,7 +354,7 @@ class Builder extends \Illuminate\Database\Schema\Builder
      */
     public function getCollection($name)
     {
-        $db = $this->connection->getMongoDB();
+        $db = $this->connection->getDatabase();
 
         $collections = iterator_to_array($db->listCollections([
             'filter' => ['name' => $name],
@@ -277,17 +364,97 @@ class Builder extends \Illuminate\Database\Schema\Builder
     }
 
     /**
-     * Get all of the collections names for the database.
+     * Get all the collections names for the database.
+     *
+     * @deprecated
      *
      * @return array
      */
     protected function getAllCollections()
     {
+        trigger_error(sprintf('Since mongodb/laravel-mongodb:5.4, Method "%s()" is deprecated without replacement.', __METHOD__), E_USER_DEPRECATED);
+
         $collections = [];
-        foreach ($this->connection->getMongoDB()->listCollections() as $collection) {
+        foreach ($this->connection->getDatabase()->listCollections() as $collection) {
             $collections[] = $collection->getName();
         }
 
         return $collections;
+    }
+
+    /** @internal */
+    public static function isAtlasSearchNotSupportedException(ServerException $e): bool
+    {
+        return in_array($e->getCode(), [
+            59,      // MongoDB 4 to 6, 7-community: no such command: 'createSearchIndexes'
+            40324,   // MongoDB 4 to 6: Unrecognized pipeline stage name: '$listSearchIndexes'
+            115,     // MongoDB 7-ent: Search index commands are only supported with Atlas.
+            6047401, // MongoDB 7: $listSearchIndexes stage is only allowed on MongoDB Atlas
+            31082,   // MongoDB 8: Using Atlas Search Database Commands and the $listSearchIndexes aggregation stage requires additional configuration.
+        ], true);
+    }
+
+    /** @param string|null $schema Database name */
+    private function getCollectionRows(string $collectionType, $schema = null)
+    {
+        $db = $this->connection->getDatabase($schema);
+        $collections = [];
+
+        foreach ($db->listCollections() as $collectionInfo) {
+            $collectionName = $collectionInfo->getName();
+
+            if ($collectionInfo->getType() !== $collectionType) {
+                continue;
+            }
+
+            $options = $collectionInfo->getOptions();
+            $collation = $options['collation'] ?? [];
+
+            // Aggregation is not supported on views
+            $stats = $collectionType !== 'view' ? $db->selectCollection($collectionName)->aggregate([
+                ['$collStats' => ['storageStats' => ['scale' => 1]]],
+                ['$project' => ['storageStats.totalSize' => 1]],
+            ])->toArray() : null;
+
+            $collections[] = [
+                'name' => $collectionName,
+                'schema' => $db->getDatabaseName(),
+                'schema_qualified_name' => $db->getDatabaseName() . '.' . $collectionName,
+                'size' => $stats[0]?->storageStats?->totalSize ?? null,
+                'comment' => null,
+                'collation' => $this->collationToString($collation),
+                'engine' => null,
+            ];
+        }
+
+        usort($collections, fn ($a, $b) => $a['name'] <=> $b['name']);
+
+        return $collections;
+    }
+
+    private function collationToString(array $collation): string
+    {
+        $map = [
+            'locale' => 'l',
+            'strength' => 's',
+            'caseLevel' => 'cl',
+            'caseFirst' => 'cf',
+            'numericOrdering' => 'no',
+            'alternate' => 'a',
+            'maxVariable' => 'mv',
+            'normalization' => 'n',
+            'backwards' => 'b',
+        ];
+
+        $parts = [];
+        foreach ($collation as $key => $value) {
+            if (array_key_exists($key, $map)) {
+                $shortKey = $map[$key];
+                $shortValue = is_bool($value) ? ($value ? '1' : '0') : $value;
+                $parts[] = $shortKey . '=' . $shortValue;
+            }
+        }
+
+        return implode(';', $parts);
     }
 }

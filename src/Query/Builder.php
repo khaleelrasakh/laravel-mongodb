@@ -23,17 +23,25 @@ use MongoDB\BSON\Binary;
 use MongoDB\BSON\ObjectID;
 use MongoDB\BSON\Regex;
 use MongoDB\BSON\UTCDateTime;
+use MongoDB\Builder\Search;
 use MongoDB\Builder\Stage\FluentFactoryTrait;
+use MongoDB\Builder\Type\QueryInterface;
+use MongoDB\Builder\Type\SearchOperatorInterface;
 use MongoDB\Driver\Cursor;
+use MongoDB\Driver\ReadPreference;
+use MongoDB\Laravel\Connection;
 use Override;
 use RuntimeException;
 use stdClass;
+use TypeError;
 
 use function array_fill_keys;
+use function array_filter;
 use function array_is_list;
 use function array_key_exists;
 use function array_map;
 use function array_merge;
+use function array_replace;
 use function array_values;
 use function assert;
 use function blank;
@@ -76,6 +84,7 @@ use function substr;
 use function trait_exists;
 use function var_export;
 
+/** @property Connection $connection */
 class Builder extends BaseBuilder
 {
     private const REGEX_DELIMITERS = ['/', '#', '~'];
@@ -97,7 +106,7 @@ class Builder extends BaseBuilder
     /**
      * The maximum amount of seconds to allow the query to run.
      *
-     * @var int
+     * @var int|float
      */
     public $timeout;
 
@@ -107,6 +116,8 @@ class Builder extends BaseBuilder
      * @var int
      */
     public $hint;
+
+    private ReadPreference $readPreference;
 
     /**
      * Custom options to add to the query.
@@ -206,7 +217,7 @@ class Builder extends BaseBuilder
     /**
      * The maximum amount of seconds to allow the query to run.
      *
-     * @param  int $seconds
+     * @param  int|float $seconds
      *
      * @return $this
      */
@@ -232,12 +243,14 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function find($id, $columns = [])
     {
         return $this->where('_id', '=', $this->convertKey($id))->first($columns);
     }
 
     /** @inheritdoc */
+    #[Override]
     public function value($column)
     {
         $result = (array) $this->first([$column]);
@@ -246,12 +259,14 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function get($columns = [])
     {
         return $this->getFresh($columns);
     }
 
     /** @inheritdoc */
+    #[Override]
     public function cursor($columns = [])
     {
         $result = $this->getFresh($columns, true);
@@ -311,6 +326,7 @@ class Builder extends BaseBuilder
         if ($this->groups || $this->aggregate) {
             $group   = [];
             $unwinds = [];
+            $set = [];
 
             // Add grouping columns to the $group part of the aggregation pipeline.
             if ($this->groups) {
@@ -321,8 +337,10 @@ class Builder extends BaseBuilder
                     // this mimics SQL's behaviour a bit.
                     $group[$column] = ['$last' => '$' . $column];
                 }
+            }
 
-                // Do the same for other columns that are selected.
+            // Add the last value of each column when there is no aggregate function.
+            if ($this->groups && ! $this->aggregate) {
                 foreach ($columns as $column) {
                     $key = str_replace('.', '_', $column);
 
@@ -346,15 +364,22 @@ class Builder extends BaseBuilder
 
                     $aggregations = blank($this->aggregate['columns']) ? [] : $this->aggregate['columns'];
 
-                    if (in_array('*', $aggregations) && $function === 'count') {
+                    if ($column === '*' && $function === 'count' && ! $this->groups) {
                         $options = $this->inheritConnectionOptions($this->options);
 
                         return ['countDocuments' => [$wheres, $options]];
                     }
 
+                    // "aggregate" is the name of the field that will hold the aggregated value.
                     if ($function === 'count') {
-                        // Translate count into sum.
-                        $group['aggregate'] = ['$sum' => 1];
+                        if ($column === '*' || $aggregations === []) {
+                            // Translate count into sum.
+                            $group['aggregate'] = ['$sum' => 1];
+                        } else {
+                            // Count the number of distinct values.
+                            $group['aggregate'] = ['$addToSet' => '$' . $column];
+                            $set['aggregate'] = ['$size' => '$aggregate'];
+                        }
                     } else {
                         $group['aggregate'] = ['$' . $function => '$' . $column];
                     }
@@ -381,6 +406,10 @@ class Builder extends BaseBuilder
                 $pipeline[] = ['$group' => $group];
             }
 
+            if ($set) {
+                $pipeline[] = ['$set' => $set];
+            }
+
             // Apply order and limit
             if ($this->orders) {
                 $pipeline[] = ['$sort' => $this->aliasIdForQuery($this->orders)];
@@ -404,7 +433,7 @@ class Builder extends BaseBuilder
 
             // Add custom query options
             if (count($this->options)) {
-                $options = array_merge($options, $this->options);
+                $options = array_replace($options, $this->options);
             }
 
             $options = $this->inheritConnectionOptions($options);
@@ -428,14 +457,14 @@ class Builder extends BaseBuilder
 
         // Add custom projections.
         if ($this->projections) {
-            $projection = array_merge($projection, $this->projections);
+            $projection = array_replace($projection, $this->projections);
         }
 
         $options = [];
 
         // Apply order, offset, limit and projection
         if ($this->timeout) {
-            $options['maxTimeMS'] = $this->timeout * 1000;
+            $options['maxTimeMS'] = (int) ($this->timeout * 1000);
         }
 
         if ($this->orders) {
@@ -462,7 +491,7 @@ class Builder extends BaseBuilder
 
         // Add custom query options
         if (count($this->options)) {
-            $options = array_merge($options, $this->options);
+            $options = array_replace($options, $this->options);
         }
 
         $options = $this->inheritConnectionOptions($options);
@@ -554,8 +583,11 @@ class Builder extends BaseBuilder
     }
 
     /** @return ($function is null ? AggregationBuilder : mixed) */
+    #[Override]
     public function aggregate($function = null, $columns = ['*'])
     {
+        assert(is_array($columns), new TypeError(sprintf('Argument #2 ($columns) must be of type array, %s given', get_debug_type($columns))));
+
         if ($function === null) {
             if (! trait_exists(FluentFactoryTrait::class)) {
                 // This error will be unreachable when the mongodb/builder package will be merged into mongodb/mongodb
@@ -596,6 +628,15 @@ class Builder extends BaseBuilder
         $this->columns            = $previousColumns;
         $this->bindings['select'] = $previousSelectBindings;
 
+        // When the aggregation is per group, we return the results as is.
+        if ($this->groups) {
+            return $results->map(function (object $result) {
+                unset($result->id);
+
+                return $result;
+            });
+        }
+
         if (isset($results[0])) {
             $result = (array) $results[0];
 
@@ -603,7 +644,23 @@ class Builder extends BaseBuilder
         }
     }
 
+    /**
+     * @param string $function
+     * @param array  $columns
+     *
+     * @return mixed
+     */
+    public function aggregateByGroup(string $function, array $columns = ['*'])
+    {
+        if (count($columns) > 1) {
+            throw new InvalidArgumentException('Aggregating by group requires zero or one columns.');
+        }
+
+        return $this->aggregate($function, $columns);
+    }
+
     /** @inheritdoc */
+    #[Override]
     public function exists()
     {
         return $this->first(['id']) !== null;
@@ -626,6 +683,7 @@ class Builder extends BaseBuilder
      *
      * @inheritdoc
      */
+    #[Override]
     public function orderBy($column, $direction = 'asc')
     {
         if (is_string($direction)) {
@@ -647,6 +705,7 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function whereBetween($column, iterable $values, $boolean = 'and', $not = false)
     {
         $type = 'between';
@@ -671,6 +730,7 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function insert(array $values)
     {
         // Allow empty insert batch for consistency with Eloquent SQL
@@ -695,7 +755,10 @@ class Builder extends BaseBuilder
             $values = [$values];
         }
 
-        $values = $this->aliasIdForQuery($values);
+        $values = array_map(
+            $this->aliasIdForQuery(...),
+            $values,
+        );
 
         $options = $this->inheritConnectionOptions();
 
@@ -705,6 +768,7 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function insertGetId(array $values, $sequence = null)
     {
         $options = $this->inheritConnectionOptions();
@@ -724,6 +788,7 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function update(array $values, array $options = [])
     {
         // Use $set as default operator for field names that are not in an operator
@@ -736,17 +801,11 @@ class Builder extends BaseBuilder
             unset($values[$key]);
         }
 
-        // Since "id" is an alias for "_id", we prevent updating it
-        foreach ($values as $fields) {
-            if (array_key_exists('id', $fields)) {
-                throw new InvalidArgumentException('Cannot update "id" field.');
-            }
-        }
-
         return $this->performUpdate($values, $options);
     }
 
     /** @inheritdoc */
+    #[Override]
     public function upsert(array $values, $uniqueBy, $update = null): int
     {
         if ($values === []) {
@@ -793,6 +852,7 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function increment($column, $amount = 1, array $extra = [], array $options = [])
     {
         $query = ['$inc' => [(string) $column => $amount]];
@@ -813,6 +873,12 @@ class Builder extends BaseBuilder
         return $this->performUpdate($query, $options);
     }
 
+    /**
+     * @param array $options
+     *
+     * @inheritdoc
+     */
+    #[Override]
     public function incrementEach(array $columns, array $extra = [], array $options = [])
     {
         $stage['$addFields'] = $extra;
@@ -830,12 +896,14 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function decrement($column, $amount = 1, array $extra = [], array $options = [])
     {
         return $this->increment($column, -1 * $amount, $extra, $options);
     }
 
     /** @inheritdoc */
+    #[Override]
     public function decrementEach(array $columns, array $extra = [], array $options = [])
     {
         $decrement = [];
@@ -847,7 +915,49 @@ class Builder extends BaseBuilder
         return $this->incrementEach($decrement, $extra, $options);
     }
 
+    /**
+     * Multiply a column's value by a given amount.
+     *
+     * @param  string    $column
+     * @param  float|int $amount
+     *
+     * @return int
+     */
+    public function multiply($column, $amount, array $extra = [], array $options = [])
+    {
+        $query = ['$mul' => [(string) $column => $amount]];
+
+        if (! empty($extra)) {
+            $query['$set'] = $extra;
+        }
+
+        // Protect
+        $this->where(function ($query) use ($column) {
+            $query->where($column, 'exists', true);
+
+            $query->whereNotNull($column);
+        });
+
+        $options = $this->inheritConnectionOptions($options);
+
+        return $this->performUpdate($query, $options);
+    }
+
+    /**
+     * Divide a column's value by a given amount.
+     *
+     * @param  string    $column
+     * @param  float|int $amount
+     *
+     * @return int
+     */
+    public function divide($column, $amount, array $extra = [], array $options = [])
+    {
+        return $this->multiply($column, 1 / $amount, $extra, $options);
+    }
+
     /** @inheritdoc */
+    #[Override]
     public function pluck($column, $key = null)
     {
         $results = $this->get($key === null ? [$column] : [$column, $key]);
@@ -858,6 +968,7 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function delete($id = null)
     {
         // If an ID is passed to the method, we will set the where clause to check
@@ -889,6 +1000,7 @@ class Builder extends BaseBuilder
     }
 
     /** @inheritdoc */
+    #[Override]
     public function from($collection, $as = null)
     {
         if ($collection) {
@@ -921,7 +1033,14 @@ class Builder extends BaseBuilder
         return $this->pluck($column, $key);
     }
 
-    /** @inheritdoc */
+    /**
+     * @param (Closure():T)|Expression|null $value
+     *
+     * @return ($value is Closure ? T : ($value is null ? Collection : Expression))
+     *
+     * @template T
+     */
+    #[Override]
     public function raw($value = null)
     {
         // Execute the closure on the mongodb collection
@@ -1024,11 +1143,13 @@ class Builder extends BaseBuilder
      *
      * @inheritdoc
      */
+    #[Override]
     public function newQuery()
     {
         return new static($this->connection, $this->grammar, $this->processor);
     }
 
+    #[Override]
     public function runPaginationCountQuery($columns = ['*'])
     {
         if ($this->distinct) {
@@ -1111,6 +1232,7 @@ class Builder extends BaseBuilder
      *
      * @return $this
      */
+    #[Override]
     public function where($column, $operator = null, $value = null, $boolean = 'and')
     {
         $params = func_get_args();
@@ -1491,6 +1613,120 @@ class Builder extends BaseBuilder
     }
 
     /**
+     * Set the read preference for the query
+     *
+     * @see https://www.php.net/manual/en/class.mongodb-driver-readpreference.php
+     *
+     * @param  string $mode
+     * @param  array  $tagSets
+     * @param  array  $options
+     *
+     * @return $this
+     */
+    public function readPreference(string $mode, ?array $tagSets = null, ?array $options = null): static
+    {
+        $this->readPreference = new ReadPreference($mode, $tagSets, $options);
+
+        return $this;
+    }
+
+    /**
+     * Performs a full-text search of the field or fields in an Atlas collection.
+     * NOTE: $search is only available for MongoDB Atlas clusters, and is not available for self-managed deployments.
+     *
+     * @see https://www.mongodb.com/docs/atlas/atlas-search/aggregation-stages/search/
+     *
+     * @return Collection<object|array>
+     */
+    public function search(
+        SearchOperatorInterface|array $operator,
+        ?string $index = null,
+        ?array $highlight = null,
+        ?bool $concurrent = null,
+        ?string $count = null,
+        ?string $searchAfter = null,
+        ?string $searchBefore = null,
+        ?bool $scoreDetails = null,
+        ?array $sort = null,
+        ?bool $returnStoredSource = null,
+        ?array $tracking = null,
+    ): Collection {
+        // Forward named arguments to the search stage, skip null values
+        $args = array_filter([
+            'operator' => $operator,
+            'index' => $index,
+            'highlight' => $highlight,
+            'concurrent' => $concurrent,
+            'count' => $count,
+            'searchAfter' => $searchAfter,
+            'searchBefore' => $searchBefore,
+            'scoreDetails' => $scoreDetails,
+            'sort' => $sort,
+            'returnStoredSource' => $returnStoredSource,
+            'tracking' => $tracking,
+        ], fn ($arg) => $arg !== null);
+
+        return $this->aggregate()->search(...$args)->get();
+    }
+
+    /**
+     * Performs a semantic search on data in your Atlas Vector Search index.
+     * NOTE: $vectorSearch is only available for MongoDB Atlas clusters, and is not available for self-managed deployments.
+     *
+     * @see https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-search-stage/
+     *
+     * @return Collection<object|array>
+     */
+    public function vectorSearch(
+        string $index,
+        string $path,
+        array $queryVector,
+        int $limit,
+        bool $exact = false,
+        QueryInterface|array|null $filter = null,
+        int|null $numCandidates = null,
+    ): Collection {
+        // Forward named arguments to the vectorSearch stage, skip null values
+        $args = array_filter([
+            'index' => $index,
+            'limit' => $limit,
+            'path' => $path,
+            'queryVector' => $queryVector,
+            'exact' => $exact,
+            'filter' => $filter,
+            'numCandidates' => $numCandidates,
+        ], fn ($arg) => $arg !== null);
+
+        return $this->aggregate()
+            ->vectorSearch(...$args)
+            ->addFields(vectorSearchScore: ['$meta' => 'vectorSearchScore'])
+            ->get();
+    }
+
+    /**
+     * Performs an autocomplete search of the field using an Atlas Search index.
+     * NOTE: $search is only available for MongoDB Atlas clusters, and is not available for self-managed deployments.
+     * You must create an Atlas Search index with an autocomplete configuration before you can use this stage.
+     *
+     * @see https://www.mongodb.com/docs/atlas/atlas-search/autocomplete/
+     *
+     * @return Collection<string>
+     */
+    public function autocomplete(string $path, string $query, bool|array $fuzzy = false, string $tokenOrder = 'any'): Collection
+    {
+        $args = ['path' => $path, 'query' => $query, 'tokenOrder' => $tokenOrder];
+        if ($fuzzy === true) {
+            $args['fuzzy'] = ['maxEdits' => 2];
+        } elseif ($fuzzy !== false) {
+            $args['fuzzy'] = $fuzzy;
+        }
+
+        return $this->aggregate()->search(
+            Search::autocomplete(...$args),
+        )->get()->pluck($path);
+    }
+
+    /**
      * Apply the connection's session to options if it's not already specified.
      */
     private function inheritConnectionOptions(array $options = []): array
@@ -1502,10 +1738,15 @@ class Builder extends BaseBuilder
             }
         }
 
+        if (! isset($options['readPreference']) && isset($this->readPreference)) {
+            $options['readPreference'] = $this->readPreference;
+        }
+
         return $options;
     }
 
     /** @inheritdoc */
+    #[Override]
     public function __call($method, $parameters)
     {
         if ($method === 'unset') {
@@ -1516,98 +1757,113 @@ class Builder extends BaseBuilder
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function toSql()
     {
         throw new BadMethodCallException('This method is not supported by MongoDB. Try "toMql()" instead.');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function toRawSql()
     {
         throw new BadMethodCallException('This method is not supported by MongoDB. Try "toMql()" instead.');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function whereColumn($first, $operator = null, $second = null, $boolean = 'and')
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function whereFullText($columns, $value, array $options = [], $boolean = 'and')
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function groupByRaw($sql, array $bindings = [])
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function orderByRaw($sql, $bindings = [])
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function unionAll($query)
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function union($query, $all = false)
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function having($column, $operator = null, $value = null, $boolean = 'and')
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function havingRaw($sql, array $bindings = [], $boolean = 'and')
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function havingBetween($column, iterable $values, $boolean = 'and', $not = false)
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function whereIntegerInRaw($column, $values, $boolean = 'and', $not = false)
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function orWhereIntegerInRaw($column, $values)
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function whereIntegerNotInRaw($column, $values, $boolean = 'and')
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
     /** @internal This method is not supported by MongoDB. */
+    #[Override]
     public function orWhereIntegerNotInRaw($column, $values, $boolean = 'and')
     {
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
-    private function aliasIdForQuery(array $values): array
+    private function aliasIdForQuery(array $values, bool $root = true): array
     {
-        if (array_key_exists('id', $values)) {
+        if (array_key_exists('id', $values) && ($root || $this->connection->getRenameEmbeddedIdField())) {
             if (array_key_exists('_id', $values) && $values['id'] !== $values['_id']) {
                 throw new InvalidArgumentException('Cannot have both "id" and "_id" fields.');
             }
@@ -1634,20 +1890,20 @@ class Builder extends BaseBuilder
             }
 
             // ".id" subfield are alias for "._id"
-            if (str_ends_with($key, '.id')) {
+            if (str_ends_with($key, '.id') && $this->connection->getRenameEmbeddedIdField()) {
                 $newkey = substr($key, 0, -3) . '._id';
                 if (array_key_exists($newkey, $values) && $value !== $values[$newkey]) {
                     throw new InvalidArgumentException(sprintf('Cannot have both "%s" and "%s" fields.', $key, $newkey));
                 }
 
-                $values[substr($key, 0, -3) . '._id'] = $value;
+                $values[$newkey] = $value;
                 unset($values[$key]);
             }
         }
 
         foreach ($values as &$value) {
             if (is_array($value)) {
-                $value = $this->aliasIdForQuery($value);
+                $value = $this->aliasIdForQuery($value, false);
             } elseif ($value instanceof DateTimeInterface) {
                 $value = new UTCDateTime($value);
             }
@@ -1665,13 +1921,16 @@ class Builder extends BaseBuilder
      *
      * @template T of array|object
      */
-    public function aliasIdForResult(array|object $values): array|object
+    public function aliasIdForResult(array|object $values, bool $root = true): array|object
     {
         if(config('database.connections.mongodb.options.DisableAliasIdForResult')){
             return $values;
         }
         if (is_array($values)) {
-            if (array_key_exists('_id', $values) && ! array_key_exists('id', $values)) {
+            if (
+                array_key_exists('_id', $values) && ! array_key_exists('id', $values)
+                && ($root || $this->connection->getRenameEmbeddedIdField())
+            ) {
                 $values['id'] = $values['_id'];
                 unset($values['_id']);
             }
@@ -1681,13 +1940,16 @@ class Builder extends BaseBuilder
                     $values[$key] = Date::instance($value->toDateTime())
                         ->setTimezone(new DateTimeZone(date_default_timezone_get()));
                 } elseif (is_array($value) || is_object($value)) {
-                    $values[$key] = $this->aliasIdForResult($value);
+                    $values[$key] = $this->aliasIdForResult($value, false);
                 }
             }
         }
 
         if ($values instanceof stdClass) {
-            if (property_exists($values, '_id') && ! property_exists($values, 'id')) {
+            if (
+                property_exists($values, '_id') && ! property_exists($values, 'id')
+                && ($root || $this->connection->getRenameEmbeddedIdField())
+            ) {
                 $values->id = $values->_id;
                 unset($values->_id);
             }
@@ -1697,7 +1959,7 @@ class Builder extends BaseBuilder
                     $values->{$key} = Date::instance($value->toDateTime())
                         ->setTimezone(new DateTimeZone(date_default_timezone_get()));
                 } elseif (is_array($value) || is_object($value)) {
-                    $values->{$key} = $this->aliasIdForResult($value);
+                    $values->{$key} = $this->aliasIdForResult($value, false);
                 }
             }
         }

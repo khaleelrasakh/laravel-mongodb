@@ -53,13 +53,16 @@ The following example shows the syntax of a query builder call:
 
 .. tip:: Set Database Connection
 
-   Before using the ``DB::table()`` method, ensure that you specify MongoDB as your application's
-   default database connection. For instructions on setting the database connection,
-   see the :ref:`laravel-quick-start-connect-to-mongodb` step in the Quick Start.
+   Before using the ``DB::table()`` method, ensure that you specify
+   MongoDB as your application's default database connection. For
+   instructions on setting the database connection, see the
+   :ref:`laravel-quick-start-connect-to-mongodb` step in the Quick
+   Start.
 
-   If MongoDB is not your application's default database, you can use the ``DB::connection()`` method
-   to specify a MongoDB connection. Pass the name of the connection to the ``connection()`` method,
-   as shown in the following code:
+   If MongoDB is not your application's default database, you can use
+   the ``DB::connection()`` method to specify a MongoDB connection. Pass
+   the name of the connection to the ``connection()`` method, as shown
+   in the following code:
 
    .. code-block:: php
 
@@ -68,6 +71,7 @@ The following example shows the syntax of a query builder call:
 This guide provides examples of the following types of query builder operations:
 
 - :ref:`laravel-retrieve-query-builder`
+- :ref:`laravel-options-query-builder`
 - :ref:`laravel-modify-results-query-builder`
 - :ref:`laravel-mongodb-read-query-builder`
 - :ref:`laravel-mongodb-write-query-builder`
@@ -191,7 +195,7 @@ the value of the ``title`` field is ``"Back to the Future"``:
    :start-after: begin query orWhere
    :end-before: end query orWhere
 
-.. note::
+.. note:: id Alias
 
    You can use the ``id`` alias in your queries to represent the
    ``_id`` field in MongoDB documents, as shown in the preceding
@@ -203,6 +207,9 @@ the value of the ``title`` field is ``"Back to the Future"``:
    
    Because of this behavior, you cannot have two separate ``id`` and ``_id``
    fields in your documents.
+
+   To learn how to disable this behavior for embedded documents, see the
+   :ref:`laravel-disable-id-alias` section of the Connection Options guide.
 
 .. _laravel-query-builder-logical-and:
 
@@ -223,7 +230,7 @@ value greater than ``8.5`` and a ``year`` value of less than
 
 .. tip::
 
-   For compatibility with Laravel, Laravel MongoDB v5.1 supports both arrow
+   For compatibility with Laravel, {+odm-long+} v5.1 supports both arrow
    (``->``) and dot (``.``) notation to access nested fields in a query
    filter. The preceding example uses dot notation to query the ``imdb.rating``
    nested field, which is the recommended syntax.
@@ -654,6 +661,33 @@ value of ``imdb.rating`` of those matches by using the
    :start-after: begin aggregation with filter
    :end-before: end aggregation with filter
 
+.. _laravel-options-query-builder:
+
+Set Query-Level Options
+-----------------------
+
+You can modify the way that the {+odm-short+} performs operations by
+setting options on the query builder. You can pass an array of options
+to the ``options()`` query builder method to specify options for the
+query.
+
+The following code demonstrates how to attach a comment to
+a query:
+
+.. literalinclude:: /includes/query-builder/QueryBuilderTest.php
+   :language: php
+   :dedent:
+   :start-after: begin options
+   :end-before: end options
+
+The query builder accepts the same options that you can set for
+the :phpmethod:`find() <phpmethod.MongoDB\\Collection::find()>` method in the
+{+php-library+}. Some of the options to modify query results, such as
+``skip``, ``sort``, and ``limit``, are settable directly as query
+builder methods and are described in the
+:ref:`laravel-modify-results-query-builder` section of this guide. We
+recommend that you use these methods instead of passing them as options.
+
 .. _laravel-modify-results-query-builder:
 
 Modify Query Results
@@ -809,6 +843,7 @@ to use the following MongoDB-specific query operations:
 - :ref:`Run MongoDB Query API operations <laravel-query-builder-whereRaw>`
 - :ref:`Match documents that contain array elements <laravel-query-builder-elemMatch>`
 - :ref:`Specify a cursor timeout <laravel-query-builder-cursor-timeout>`
+- :ref:`Specify a read preference <laravel-query-builder-read-pref>`
 - :ref:`Match locations by using geospatial searches <laravel-query-builder-geospatial>`
 
 .. _laravel-query-builder-exists:
@@ -837,7 +872,8 @@ Contains All Fields Example
 
 The following example shows how to use the ``all`` query
 operator with the ``where()`` query builder method to match
-documents that contain all the specified fields:
+documents that have a ``writers`` array field containing all
+the specified values:
 
 .. literalinclude:: /includes/query-builder/QueryBuilderTest.php
    :language: php
@@ -1002,6 +1038,31 @@ to specify a maximum duration to wait for cursor operations to complete.
    `MongoDB\Collection::find() <https://www.mongodb.com/docs/php-library/current/reference/method/MongoDBCollection-find/>`__
    in the PHP Library documentation.
 
+.. _laravel-query-builder-read-pref:
+
+Specify a Read Preference Example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+You can control how the {+odm-short+} directs read operations to replica
+set members by setting a read preference. 
+
+The following example queries the ``movies`` collection for documents
+in which the ``runtime`` value is greater than ``240``. The example passes a
+value of ``ReadPreference::SECONDARY_PREFERRED`` to the ``readPreference()``
+method, which sends the query to secondary replica set members
+or the primary member if no secondaries are available:
+
+.. literalinclude:: /includes/query-builder/QueryBuilderTest.php
+   :language: php
+   :dedent:
+   :start-after: begin query read pref
+   :end-before: end query read pref
+
+.. tip::
+
+   To learn more about read preferences, see :manual:`Read Preference
+   </core/read-preference/>` in the MongoDB {+server-docs-name+}.
+
 .. _laravel-query-builder-geospatial:
 
 Match Locations by Using Geospatial Operations
@@ -1030,7 +1091,7 @@ in the {+server-docs-name+}.
 .. _laravel-query-builder-geospatial-near:
 
 Near a Position Example
-~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^
 
 The following example shows how to use the ``near`` query operator
 with the ``where()`` query builder method to match documents that
@@ -1050,7 +1111,7 @@ in the {+server-docs-name+}.
 .. _laravel-query-builder-geospatial-geoWithin:
 
 Within an Area Example
-~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^
 
 The following example shows how to use the ``geoWithin``
 query operator with the ``where()``
@@ -1067,7 +1128,7 @@ GeoJSON object:
 .. _laravel-query-builder-geospatial-geoIntersects:
 
 Intersecting a Geometry Example
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The following example shows how to use the ``geoInstersects``
 query operator with the ``where()`` query builder method to
@@ -1083,7 +1144,7 @@ the specified ``LineString`` GeoJSON object:
 .. _laravel-query-builder-geospatial-geoNear:
 
 Proximity Data for Nearby Matches Example
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The following example shows how to use the ``geoNear`` aggregation operator
 with the ``raw()`` query builder method to perform an aggregation that returns
@@ -1108,6 +1169,7 @@ This section includes query builder examples that show how to use the
 following MongoDB-specific write operations:
 
 - :ref:`Upsert a document <laravel-mongodb-query-builder-upsert>`
+- :ref:`Multiply and divide values <laravel-mongodb-query-builder-mul-div>`
 - :ref:`Increment a numerical value <laravel-mongodb-query-builder-increment>`
 - :ref:`Decrement a numerical value <laravel-mongodb-query-builder-decrement>`
 - :ref:`Add an array element <laravel-mongodb-query-builder-push>`
@@ -1190,6 +1252,41 @@ and the ``title`` field and value specified in the ``where()`` query operation:
 
 The ``update()`` query builder method returns the number of documents that the
 operation updated or inserted.
+
+.. _laravel-mongodb-query-builder-mul-div:
+
+Multiply and Divide Numerical Values Example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Starting in {+odm-short+} v5.5, you can perform multiplication and
+division operations on numerical values by using the ``multiply()`` and
+``divide()`` query builder methods.
+
+The following example shows how to use the ``multiply()`` and
+``divide()`` methods to manipulate the values of the
+``imdb.votes`` and ``runtime`` fields:
+
+.. literalinclude:: /includes/query-builder/QueryBuilderTest.php
+   :language: php
+   :dedent:
+   :start-after: begin multiply divide
+   :end-before: end multiply divide
+
+.. tip:: update() Method
+
+   You can perform the same operations by using the ``update()``
+   method and passing an update document that includes the :manual:`$mul
+   </reference/operator/update/mul/>` operator. To learn more about
+   ``update()``, see the :ref:`laravel-fundamentals-write-modify` guide.
+
+You can optionally pass an array parameter to perform a ``$set`` update
+in the same operation, as shown in the following example:
+
+.. literalinclude:: /includes/query-builder/QueryBuilderTest.php
+   :language: php
+   :dedent:
+   :start-after: begin multiply with set
+   :end-before: end multiply with set
 
 .. _laravel-mongodb-query-builder-increment:
 
