@@ -251,19 +251,19 @@ class Builder extends EloquentBuilder
 
         // Convert MongoCursor results to a collection of models.
         if ($results instanceof CursorInterface) {
-            $config=!config('database.connections.mongodb.options.AggregateCollectionArray');
-    if ($config) {
-        $results->setTypeMap(['root' => 'array', 'document' => 'array', 'array' => 'array']);
-    }
+            $config = !config('database.connections.mongodb.options.AggregateCollectionArray');
+            if ($config) {
+                $results->setTypeMap(['root' => 'array', 'document' => 'array', 'array' => 'array']);
+            }
 
-    $results = iterator_to_array($results);
+            $results = iterator_to_array($results);
 
-    if ($config) {
-        $results = array_map(fn ($document) => $this->query->aliasIdForResult($document), $results);
-    }
+            if ($config) {
+                $results = array_map(fn($document) => $this->query->aliasIdForResult($document), $results);
+            }
 
-    return $this->model->hydrate($results);
-}
+            return $this->model->hydrate($results);
+        }
 
         // Convert MongoDB Document to a single object.
         if (is_object($results) && (property_exists($results, '_id') || property_exists($results, 'id'))) {
@@ -356,12 +356,12 @@ class Builder extends EloquentBuilder
 
         if ($shouldReverse) {
             $this->query->orders = collect($this->query->orders)
-                ->map(static fn (int $direction) => $direction === 1 ? -1 : 1)
+                ->map(static fn(int $direction) => $direction === 1 ? -1 : 1)
                 ->toArray();
         }
 
         return collect($this->query->orders)
-            ->map(static fn ($direction, $column) => [
+            ->map(static fn($direction, $column) => [
                 'column' => $column,
                 'direction' => $direction === 1 ? 'asc' : 'desc',
             ])->values();
