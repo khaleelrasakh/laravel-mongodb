@@ -1861,57 +1861,37 @@ class Builder extends BaseBuilder
         throw new BadMethodCallException('This method is not supported by MongoDB');
     }
 
-    private function aliasIdForQuery(array $values, bool $root = true): array
-    {
-        if (array_key_exists('id', $values) && ($root || $this->connection->getRenameEmbeddedIdField())) {
-            if (array_key_exists('_id', $values) && $values['id'] !== $values['_id']) {
-                throw new InvalidArgumentException('Cannot have both "id" and "_id" fields.');
-            }
-
-            $values['_id'] = $values['id'];
-            unset($values['id']);
+       private function aliasIdForQuery(array $values, bool $root = true): array
+{
+    foreach ($values as $key => $value) {
+        if (! is_string($key)) {
+            continue;
         }
 
-        foreach ($values as $key => $value) {
-            if (! is_string($key)) {
-                continue;
+        if (str_contains($key, '->')) {
+            $newkey = str_replace('->', '.', $key);
+            if (array_key_exists($newkey, $values) && $value !== $values[$newkey]) {
+                throw new InvalidArgumentException(sprintf('Cannot have both "%s" and "%s" fields.', $key, $newkey));
             }
 
-            // "->" arrow notation for subfields is an alias for "." dot notation
-            if (str_contains($key, '->')) {
-                $newkey = str_replace('->', '.', $key);
-                if (array_key_exists($newkey, $values) && $value !== $values[$newkey]) {
-                    throw new InvalidArgumentException(sprintf('Cannot have both "%s" and "%s" fields.', $key, $newkey));
-                }
-
-                $values[$newkey] = $value;
-                unset($values[$key]);
-                $key = $newkey;
-            }
-
-            // ".id" subfield are alias for "._id"
-            if (str_ends_with($key, '.id') && $this->connection->getRenameEmbeddedIdField()) {
-                $newkey = substr($key, 0, -3) . '._id';
-                if (array_key_exists($newkey, $values) && $value !== $values[$newkey]) {
-                    throw new InvalidArgumentException(sprintf('Cannot have both "%s" and "%s" fields.', $key, $newkey));
-                }
-
-                $values[$newkey] = $value;
-                unset($values[$key]);
-            }
+            $values[$newkey] = $value;
+            unset($values[$key]);
+            $key = $newkey;
         }
 
-        foreach ($values as &$value) {
-            if (is_array($value)) {
-                $value = $this->aliasIdForQuery($value, false);
-            } elseif ($value instanceof DateTimeInterface) {
-                $value = new UTCDateTime($value);
-            }
-        }
-
-        return $values;
+        
     }
 
+    foreach ($values as &$value) {
+        if (is_array($value)) {
+            $value = $this->aliasIdForQuery($value, false);
+        } elseif ($value instanceof DateTimeInterface) {
+            $value = new UTCDateTime($value);
+        }
+    }
+
+    return $values;
+}
     /**
      * @internal
      *
